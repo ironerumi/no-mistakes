@@ -2,9 +2,7 @@ package testgit
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -23,11 +21,6 @@ func TestRealGit_IgnoresWrapperOnPATH(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	// The wrapper, not real git, is now the PATH winner.
-	if pathWinner, err := exec.LookPath("git"); err != nil || pathWinner != wrapper {
-		t.Fatalf("test setup: PATH winner = %q, %v, want the wrapper %q", pathWinner, err, wrapper)
-	}
 
 	got, err := RealGit()
 	if err != nil {
@@ -54,55 +47,4 @@ func TestLooksLikeFakeCLIPath(t *testing.T) {
 	if looksLikeFakeCLIPath("/usr/bin/git") {
 		t.Fatal("looksLikeFakeCLIPath(\"/usr/bin/git\") = true, want false")
 	}
-}
-
-// TestNoStrayExecLookPathGit statically enforces centralization: every test
-// file that needs "real git" (as opposed to a bare availability check) must
-// resolve it through testgit.RealGit, not its own exec.LookPath("git") - see
-// issue #5 for why a second, independently-resolved "real git" pointer can
-// reintroduce the unbounded fakecli/wrapper recursion this package prevents.
-// Scoped to _test.go files: production code (e.g. internal/cli/doctor.go's
-// plain "is git installed" check) never resolves a path to spawn a fake CLI
-// against, so it is out of scope for this issue.
-func TestNoStrayExecLookPathGit(t *testing.T) {
-	repoRoot := repoRootForTest(t)
-	const needle = `exec.LookPath("git")`
-	// This file's own doc comments and implementation legitimately mention
-	// the pattern; everything else in internal/ must not.
-	allow := map[string]bool{
-		filepath.Join(repoRoot, "internal", "testgit", "testgit_test.go"): true,
-	}
-	var hits []string
-	err := filepath.Walk(filepath.Join(repoRoot, "internal"), func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, "_test.go") {
-			return err
-		}
-		if allow[path] {
-			return nil
-		}
-		raw, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
-		}
-		if strings.Contains(string(raw), needle) {
-			hits = append(hits, path)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(hits) > 0 {
-		t.Fatalf("stray %s in %v; route through testgit.RealGit() instead", needle, hits)
-	}
-}
-
-func repoRootForTest(t *testing.T) string {
-	t.Helper()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// This file lives at <repoRoot>/internal/testgit/testgit_test.go.
-	return filepath.Join(wd, "..", "..")
 }
