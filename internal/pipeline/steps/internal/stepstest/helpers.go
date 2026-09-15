@@ -20,10 +20,11 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-var testGitExecutable, _ = exec.LookPath("git")
+var testGitExecutable, _ = testgit.RealGit()
 
 // ExecuteWithAutoFix drives step the way the executor drives a step whose
 // outcome carries auto-fix findings (see Executor.executeStep): it executes
