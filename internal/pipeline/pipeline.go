@@ -109,6 +109,12 @@ type StepOutcome struct {
 	NeedsApproval bool // whether the step pauses for user action
 	AutoFixable   bool
 	Findings      string // JSON findings for TUI display (optional)
+	// ReviewedPaths is the review step's coverage record for this round: the
+	// changed files the turn actually examined. It is a positive-verification
+	// signal only - a finding the operator selected for a fix leaves the review
+	// step's outstanding set only when a later round lists the finding's file
+	// here and no longer reports the defect. Empty for steps that do not review.
+	ReviewedPaths []string
 	ExitCode      int    // process exit code (0 = success)
 	PRURL         string // PR/MR URL if this step created or found one
 	Skipped       bool   // mark the step as skipped without failing the run

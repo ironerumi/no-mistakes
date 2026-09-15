@@ -317,6 +317,11 @@ var reviewFindingsSchema = json.RawMessage(`{
 				"required": ["severity", "description", "action", "review_scope"]
 			}
 		},
+		"reviewed_paths": {
+			"type": "array",
+			"items": {"type": "string"},
+			"description": "Exact set of changed files this pass actually read and judged; a file omitted here is treated as unverified"
+		},
 		"tested": {
 			"type": "array",
 			"items": {"type": "string"}
@@ -328,7 +333,7 @@ var reviewFindingsSchema = json.RawMessage(`{
 		"risk_rationale": {"type": "string"},
 		"risk_scope": {"type": "string", "enum": ["source-or-external", "pipeline-owned-delivery"]}
 	},
-	"required": ["findings", "risk_level", "risk_rationale", "risk_scope"]
+	"required": ["findings", "reviewed_paths", "risk_level", "risk_rationale", "risk_scope"]
 }`)
 
 // WithCustomGates returns the run's step sequence: the given core pipeline
