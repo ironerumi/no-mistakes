@@ -1016,7 +1016,7 @@ rounds:
 			// outstanding set (no new findings, nothing verified), which is the
 			// loop's "round added no new findings" stop condition.
 			outstandingFindings = resolveVerifiedFindingsJSON(outstandingFindings, pendingVerificationIDs, outcome.ReviewedPaths, roundFindings)
-			pendingVerificationIDs = nil
+			pendingVerificationIDs = retainFindingIDs(outstandingFindings, pendingVerificationIDs)
 			effectiveFindings = mergeOutstandingFindingsJSON(outstandingFindings, roundFindings)
 			outstandingFindings = effectiveFindings
 			if roundWasFix {
@@ -1026,7 +1026,7 @@ rounds:
 					stalledRounds = 0
 				}
 			}
-			if stopReason = reviewLoopStopReason(fixRounds, stalledRounds); stopReason != "" && hasAskUserFindingsJSON(effectiveFindings) {
+			if stopReason = reviewLoopStopReason(fixRounds, stalledRounds); stopReason != "" && hasActionableFindingsJSON(effectiveFindings) {
 				writeLog(fmt.Sprintf("review fix-round loop stopping: %s", stopReason))
 				effectiveFindings = mergeOutstandingFindingsJSON(effectiveFindings, reviewLoopStopFindingsJSON(stopReason))
 				outstandingFindings = effectiveFindings
@@ -1110,7 +1110,7 @@ rounds:
 				sctx.PreviousFindings = fixableFindings
 				sctx.DeferredFindings = removeMatchingFindingsJSON(effectiveFindings, fixableFindings)
 				if carryFindings {
-					pendingVerificationIDs = findingIDList(fixableFindings)
+					pendingVerificationIDs = appendFindingIDs(pendingVerificationIDs, findingIDsInMergedJSON(effectiveFindings, fixableFindings))
 				}
 				nextTrigger = "auto_fix"
 				continue rounds
@@ -1258,7 +1258,7 @@ rounds:
 					// approves, skips, or aborts this gate. Subtracting it here is the
 					// P1 that let a no-op fix complete a run with the defect
 					// unresolved.
-					pendingVerificationIDs = combineSelectedFindingIDs(response.findingIDs, mergedFindings)
+					pendingVerificationIDs = appendFindingIDs(pendingVerificationIDs, combineSelectedFindingIDs(response.findingIDs, mergedFindings))
 					fixRounds++
 				}
 				nextTrigger = "auto_fix"

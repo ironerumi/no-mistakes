@@ -51,6 +51,72 @@ func findingIDList(raw string) []string {
 	return ids
 }
 
+func retainFindingIDs(raw string, ids []string) []string {
+	if raw == "" || len(ids) == 0 {
+		return nil
+	}
+	present := make(map[string]bool)
+	for _, id := range findingIDList(raw) {
+		present[id] = true
+	}
+	retained := make([]string, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id != "" && present[id] && !seen[id] {
+			retained = append(retained, id)
+			seen[id] = true
+		}
+	}
+	return retained
+}
+
+func appendFindingIDs(existing, additional []string) []string {
+	result := append([]string(nil), existing...)
+	seen := make(map[string]bool, len(existing)+len(additional))
+	for _, id := range existing {
+		if id != "" {
+			seen[id] = true
+		}
+	}
+	for _, id := range additional {
+		if id != "" && !seen[id] {
+			result = append(result, id)
+			seen[id] = true
+		}
+	}
+	return result
+}
+
+func findingIDsInMergedJSON(mergedRaw, selectedRaw string) []string {
+	if selectedRaw == "" {
+		return nil
+	}
+	merged, mergedErr := types.ParseFindingsJSON(mergedRaw)
+	selected, selectedErr := types.ParseFindingsJSON(selectedRaw)
+	if mergedErr != nil || selectedErr != nil {
+		return findingIDList(selectedRaw)
+	}
+	mergedCounts := countFindingFingerprints(merged.Items)
+	selectedCounts := countFindingFingerprints(selected.Items)
+	matched := make(map[int]bool, len(merged.Items))
+	ids := make([]string, 0, len(selected.Items))
+	for _, selectedItem := range selected.Items {
+		if selectedItem.ID == "" {
+			continue
+		}
+		exact := map[types.Finding]bool{findingKey(selectedItem): true}
+		for index, mergedItem := range merged.Items {
+			if matched[index] || mergedItem.ID == "" || !hasFindingMatch(mergedItem, exact, mergedCounts, selectedCounts) {
+				continue
+			}
+			matched[index] = true
+			ids = append(ids, mergedItem.ID)
+			break
+		}
+	}
+	return ids
+}
+
 // marshalFindingIDs encodes a list of finding IDs as a JSON array. Empty
 // input returns an empty string so the caller can leave the DB column NULL.
 func marshalFindingIDs(ids []string) string {

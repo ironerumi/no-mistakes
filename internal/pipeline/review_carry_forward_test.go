@@ -172,6 +172,95 @@ func TestExecutor_ReviewCarryForward_AutoFixFindingStillBlocksAfterNoOp(t *testi
 	waitExecutorDone(t, done)
 }
 
+func TestExecutor_ReviewCarryForward_RetainsPendingIDsAcrossRounds(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	round := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			round++
+			switch round {
+			case 1:
+				return &StepOutcome{
+					NeedsApproval: true,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"old.go","description":"old issue","action":"ask-user"}],"summary":"1 finding"}`,
+				}, nil
+			case 2:
+				return &StepOutcome{
+					AutoFixable:   true,
+					NeedsApproval: true,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"new.go","description":"new issue","action":"auto-fix"}],"summary":"1 finding"}`,
+				}, nil
+			default:
+				return &StepOutcome{ReviewedPaths: []string{"old.go", "new.go"}}, nil
+			}
+		},
+	}
+
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps[0].Status != types.StepStatusCompleted || steps[0].FindingsJSON != nil {
+		t.Fatalf("step = status %s findings %v, want completed with no outstanding findings", steps[0].Status, steps[0].FindingsJSON)
+	}
+}
+
+func TestExecutor_ReviewLoopStopRecordsAutoFixFinding(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{
+				AutoFixable:   true,
+				NeedsApproval: true,
+				Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"service.go","description":"persistent issue","action":"auto-fix"}],"summary":"1 finding"}`,
+			}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: reviewFixRoundLimit}}, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+	waitForOutstandingContains(t, database, run.ID, "review-loop-stop")
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps[0].FindingsJSON == nil {
+		t.Fatal("review loop stopped without findings")
+	}
+	parsed, err := types.ParseFindingsJSON(*steps[0].FindingsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundStop := false
+	for _, item := range parsed.Items {
+		if item.ID == "review-loop-stop" {
+			foundStop = true
+		}
+	}
+	if !foundStop {
+		t.Fatalf("stop finding missing from %s", *steps[0].FindingsJSON)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+}
+
 func TestExecutor_ReviewCarryForward_PositiveCoverageClearsFinding(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
