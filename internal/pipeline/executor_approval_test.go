@@ -373,7 +373,7 @@ func TestExecutor_ResumeStalledReviewRefusesAnotherFixRound(t *testing.T) {
 	if err := database.StartStep(stepResult.ID); err != nil {
 		t.Fatal(err)
 	}
-	findings := `{"findings":[{"id":"review-loop-stop","severity":"warning","description":"review stopped","action":"ask-user"}],"summary":"stopped"}`
+	findings := reviewLoopStopFindingsJSON("stalled")
 	if err := database.SetStepFindings(stepResult.ID, findings); err != nil {
 		t.Fatal(err)
 	}

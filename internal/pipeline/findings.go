@@ -389,13 +389,15 @@ func reviewLoopStopReason(fixRounds, stalledRounds int) string {
 // still-outstanding findings instead of silently completing or burning another
 // round. The finding has no file and is therefore never verified away; only
 // approve, skip, or abort clears it.
+const reviewLoopStopFindingID = "review-loop-stop"
+
 func reviewLoopStopFindingsJSON(reason string) string {
 	if reason == "" {
 		return ""
 	}
 	encoded, err := types.MarshalFindingsJSON(types.Findings{
 		Items: []types.Finding{{
-			ID:          "review-loop-stop",
+			ID:          reviewLoopStopFindingID,
 			Severity:    types.FindingSeverityWarning,
 			Description: "Review stopped looping: " + reason + ". The outstanding findings above are still unresolved. Decide: approve to ship as-is, skip the step, or abort.",
 			Action:      types.ActionAskUser,
@@ -411,13 +413,17 @@ func reviewLoopStopFindingsJSON(reason string) string {
 	return encoded
 }
 
+func isReviewLoopStopFinding(item types.Finding) bool {
+	return strings.HasPrefix(item.ID, reviewLoopStopFindingID) && item.Action == types.ActionAskUser && item.File == "" && strings.HasPrefix(item.Description, "Review stopped looping: ")
+}
+
 func reviewLoopStopFindingPresent(raw string) bool {
 	findings, err := types.ParseFindingsJSON(raw)
 	if err != nil {
 		return false
 	}
 	for _, item := range findings.Items {
-		if item.ID == "review-loop-stop" {
+		if isReviewLoopStopFinding(item) {
 			return true
 		}
 	}
@@ -450,6 +456,27 @@ func normalizeCoveredPath(value string) string {
 		return ""
 	}
 	return cleaned
+}
+
+func findingReportedForVerification(item types.Finding, reportedItems []types.Finding, reported map[types.Finding]bool, outstandingCounts, reportedCounts map[types.Finding]int) bool {
+	if hasFindingMatch(item, reported, outstandingCounts, reportedCounts) {
+		return true
+	}
+	for _, reportedItem := range reportedItems {
+		if sameFindingLocation(item, reportedItem) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameFindingLocation(left, right types.Finding) bool {
+	leftFile := normalizeCoveredPath(left.File)
+	rightFile := normalizeCoveredPath(right.File)
+	if leftFile == "" || leftFile != rightFile {
+		return false
+	}
+	return left.Line == right.Line
 }
 
 // resolveVerifiedFindingsJSON returns outstandingRaw minus every finding whose
@@ -499,7 +526,7 @@ func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, rev
 	thisRoundCounts := countFindingFingerprints(thisRound.Items)
 	result := types.FindingsMetadata(outstanding)
 	for _, item := range outstanding.Items {
-		if pending[item.ID] && covered[normalizeCoveredPath(item.File)] && !hasFindingMatch(item, reported, outstandingCounts, thisRoundCounts) {
+		if pending[item.ID] && covered[normalizeCoveredPath(item.File)] && !findingReportedForVerification(item, thisRound.Items, reported, outstandingCounts, thisRoundCounts) {
 			continue
 		}
 		result.Items = append(result.Items, item)
@@ -553,7 +580,11 @@ func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string) string {
 			seen[id] = true
 			continue
 		}
-		merged.Items[i].ID = nextFreeReviewFindingID(seen)
+		if isReviewLoopStopFinding(merged.Items[i]) {
+			merged.Items[i].ID = nextFreeReviewLoopStopFindingID(seen)
+		} else {
+			merged.Items[i].ID = nextFreeReviewFindingID(seen)
+		}
 		seen[merged.Items[i].ID] = true
 		changed = true
 	}
@@ -565,6 +596,18 @@ func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string) string {
 		return mergedRaw
 	}
 	return encoded
+}
+
+func nextFreeReviewLoopStopFindingID(seen map[string]bool) string {
+	if !seen[reviewLoopStopFindingID] {
+		return reviewLoopStopFindingID
+	}
+	for i := 1; ; i++ {
+		id := reviewLoopStopFindingID + "-" + strconv.Itoa(i)
+		if !seen[id] {
+			return id
+		}
+	}
 }
 
 func nextFreeReviewFindingID(seen map[string]bool) string {

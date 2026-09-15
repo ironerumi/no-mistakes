@@ -420,6 +420,7 @@ func TestResolveVerifiedFindingsJSON(t *testing.T) {
 		{name: "empty coverage list clears nothing", thisRound: "", reviewed: []string{}, pending: []string{"review-1"}},
 		{name: "coverage of another file clears nothing", thisRound: "", reviewed: []string{"cache.go"}, pending: []string{"review-1"}},
 		{name: "reported defect stays outstanding", thisRound: reported, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
+		{name: "reworded defect stays outstanding", thisRound: `{"findings":[{"id":"review-9","severity":"info","file":"service.go","line":10,"description":"same nil dereference remains","action":"no-op"}],"summary":"1 finding"}`, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
 		{name: "finding covered and no longer reported clears", thisRound: "", reviewed: []string{"service.go"}, pending: []string{"review-1"}, wantCleared: true},
 		{name: "an unwatched finding keeps its neighbour pending", thisRound: "", reviewed: []string{"cache.go"}, pending: []string{"review-1"}},
 	}
@@ -476,6 +477,23 @@ func TestReviewLoopStopReason(t *testing.T) {
 // append-only merge: the accumulated set is never reduced, an item keeps its
 // ID (the selector `axi respond --findings <id>` uses), and a colliding new ID
 // is re-minted rather than silently replacing the outstanding item.
+func TestMergeOutstandingFindingsJSON_SeparatesStopMarkerFromCollidingAgentID(t *testing.T) {
+	existing := `{"findings":[{"id":"review-loop-stop","severity":"error","file":"service.go","description":"agent finding","action":"ask-user"}],"summary":"1 finding"}`
+	merged := mergeOutstandingFindingsJSON(existing, reviewLoopStopFindingsJSON("stalled"))
+	if !reviewLoopStopFindingPresent(merged) {
+		t.Fatalf("stop marker was not preserved after ID collision: %s", merged)
+	}
+	parsed, err := types.ParseFindingsJSON(merged)
+	if err != nil {
+		t.Fatalf("parse merged findings: %v", err)
+	}
+	for _, item := range parsed.Items {
+		if isReviewLoopStopFinding(item) && item.ID == "review-loop-stop" {
+			t.Fatalf("stop marker retained the colliding agent ID: %s", merged)
+		}
+	}
+}
+
 func TestMergeOutstandingFindingsJSON_AppendsAndKeepsSelectionIdentity(t *testing.T) {
 	merged := mergeOutstandingFindingsJSON(reviewCarryTwoFindings, `{"findings":[{"id":"review-1","severity":"info","file":"other.go","description":"restated as a new item","action":"ask-user"}],"summary":"1 finding"}`)
 	if !strings.Contains(merged, "service.go") || !strings.Contains(merged, "cache.go") {
