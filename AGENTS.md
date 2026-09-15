@@ -154,7 +154,6 @@ The rationale lives in the `resolveRun` doc comment and the status-rendering com
 **Pipeline step tests (CI latency)**
 
 - Fake `gh`/`glab`/`git` on PATH must be the tiny helper at `internal/pipeline/fakecli`, compiled once per test process without `-race` (`stepstest.Init` / `LinkFakeCLI`). Do not re-exec the race-instrumented test binary as those names: that was ~0.8-1.1s per spawn and pushed `internal/pipeline/steps` into the 10-minute package timeout.
-- `FAKE_CLI_REAL_GIT` must resolve to the real git. If it resolves to a wrapper that itself resolves `git` from a test PATH whose first entry is a fakecli binDir, the fake git self-execs `rev-parse --verify <sha>^{commit}` in an unbounded chain (~20 new processes/second) that exhausts the fork limit; killing middle nodes does not stop it, because the chain tail keeps forking. Contain by deleting the fakecli binDir so the exec fails, then batch-kill, and prove safety with `pgrep -f fakecli` after ONE narrow `-run` before any package-wide run. `internal/pipeline` (the executor package) itself has no fakecli/stepstest test dependency.
 - CI-monitor tests live in `internal/pipeline/steps/citest` so no child of `internal/pipeline/steps` sits near that cap. Both packages run under `go test ./...`; do not move them behind the `e2e` tag.
 
 **Telemetry Shape**
