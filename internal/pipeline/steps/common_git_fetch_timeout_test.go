@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 // hangingGitRemote accepts TCP connections and then says nothing, which is what
@@ -36,7 +37,7 @@ func hangingGitRemote(t *testing.T) string {
 }
 
 func TestFetchRunUpstreamBranch_TimesOutAndSaysSo(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
+	if _, err := testgit.RealGit(); err != nil {
 		t.Skip("git not available")
 	}
 
