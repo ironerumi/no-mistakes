@@ -37,7 +37,8 @@ func hangingGitRemote(t *testing.T) string {
 }
 
 func TestFetchRunUpstreamBranch_TimesOutAndSaysSo(t *testing.T) {
-	if _, err := testgit.RealGit(); err != nil {
+	realGit, err := testgit.RealGit()
+	if err != nil {
 		t.Skip("git not available")
 	}
 
@@ -46,7 +47,7 @@ func TestFetchRunUpstreamBranch_TimesOutAndSaysSo(t *testing.T) {
 	t.Cleanup(func() { fetchUpstreamTimeout = original })
 
 	workDir := t.TempDir()
-	if out, err := exec.Command("git", "-C", workDir, "init", "-q").CombinedOutput(); err != nil {
+	if out, err := exec.Command(realGit, "-C", workDir, "init", "-q").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
 
@@ -58,7 +59,7 @@ func TestFetchRunUpstreamBranch_TimesOutAndSaysSo(t *testing.T) {
 
 	start := time.Now()
 	// No deadline on the caller context: the fetch must impose its own.
-	err := fetchRunUpstreamBranch(context.Background(), sctx, "main")
+	err = fetchRunUpstreamBranch(context.Background(), sctx, "main")
 	elapsed := time.Since(start)
 
 	if err == nil {

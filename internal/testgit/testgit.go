@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -40,5 +41,26 @@ func RealGit() (string, error) {
 // directory (os.MkdirTemp("", "fakecli...")), the only way a PATH-derived
 // git fallback could actually be the fake CLI shadowing itself.
 func looksLikeFakeCLIPath(p string) bool {
-	return strings.Contains(p, "fakecli")
+	tempDir, err := filepath.Abs(os.TempDir())
+	if err != nil {
+		return false
+	}
+	candidate, err := filepath.Abs(p)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(tempDir, candidate)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return false
+	}
+
+	fakeDirName := relative
+	if i := strings.IndexByte(relative, filepath.Separator); i >= 0 {
+		fakeDirName = relative[:i]
+	}
+	if !strings.HasPrefix(fakeDirName, "fakecli") {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(tempDir, fakeDirName))
+	return err == nil && info.IsDir()
 }

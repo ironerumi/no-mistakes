@@ -47,4 +47,7 @@ func TestLooksLikeFakeCLIPath(t *testing.T) {
 	if looksLikeFakeCLIPath("/usr/bin/git") {
 		t.Fatal("looksLikeFakeCLIPath(\"/usr/bin/git\") = true, want false")
 	}
+	if looksLikeFakeCLIPath("/opt/fakecli-tools/bin/git") {
+		t.Fatal("looksLikeFakeCLIPath(\"/opt/fakecli-tools/bin/git\") = true, want false")
+	}
 }
