@@ -526,7 +526,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "aborted by user", &duration)
 			return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
 		case types.ActionFix:
-			if gate.step.Name() == types.StepReview && gate.fixRounds >= reviewFixRoundLimit {
+			if gate.step.Name() == types.StepReview && (gate.fixRounds >= reviewFixRoundLimit || reviewLoopStopFindingPresent(gate.findings)) {
 				continue
 			}
 			telemetry.Track("fix", e.fixTelemetryFields("user", gate.step.Name(), selectedFindingCount(gate.findings, response.findingIDs), 0))

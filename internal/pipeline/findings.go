@@ -411,6 +411,19 @@ func reviewLoopStopFindingsJSON(reason string) string {
 	return encoded
 }
 
+func reviewLoopStopFindingPresent(raw string) bool {
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return false
+	}
+	for _, item := range findings.Items {
+		if item.ID == "review-loop-stop" {
+			return true
+		}
+	}
+	return false
+}
+
 // reviewedPathsJSON extracts a review round's coverage record (the files the
 // turn actually examined) from its raw findings payload.
 func reviewedPathsJSON(raw string) []string {

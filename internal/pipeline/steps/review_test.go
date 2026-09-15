@@ -41,6 +41,7 @@ func cleanReviewFindings() Findings {
 		RiskLevel:     "low",
 		RiskRationale: "clean",
 		RiskScope:     types.FindingsRiskScopeSourceOrExternal,
+		ReviewedPaths: []string{"feature.txt"},
 	}
 }
 
@@ -77,18 +78,23 @@ func TestReviewStep_UnrunAnalyzerDoesNotApprove(t *testing.T) {
 		},
 		{
 			name:   "unknown finding severity",
-			result: &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"critical","description":"unhandled error","action":"auto-fix"}],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)},
+			result: &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"critical","description":"unhandled error","action":"auto-fix"}],"reviewed_paths":[],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)},
 			want:   "review analyzer finding 0 missing severity",
 		},
 		{
 			name:   "invalid risk level",
-			result: &agent.Result{Output: json.RawMessage(`{"findings":[],"risk_level":"critical","risk_rationale":"clean","risk_scope":"source-or-external"}`)},
+			result: &agent.Result{Output: json.RawMessage(`{"findings":[],"reviewed_paths":[],"risk_level":"critical","risk_rationale":"clean","risk_scope":"source-or-external"}`)},
 			want:   "review analyzer findings invalid risk level",
 		},
 		{
 			name:   "blank risk scope",
-			result: &agent.Result{Output: json.RawMessage(`{"findings":[],"risk_level":"low","risk_rationale":"clean","risk_scope":" "}`)},
+			result: &agent.Result{Output: json.RawMessage(`{"findings":[],"reviewed_paths":[],"risk_level":"low","risk_rationale":"clean","risk_scope":" "}`)},
 			want:   "review analyzer findings missing risk assessment",
+		},
+		{
+			name:   "missing reviewed paths",
+			result: &agent.Result{Output: json.RawMessage(`{"findings":[],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)},
+			want:   "review analyzer findings missing reviewed_paths",
 		},
 	}
 	for _, tc := range cases {
@@ -217,7 +223,7 @@ func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
 	}
 	var calls []call
 
-	findings := `{"findings":[{"file":"a.txt","line":1,"severity":"warning","action":"auto-fix","description":"tidy"}],"risk_level":"low","risk_rationale":"tidy finding","risk_scope":"source-or-external"}`
+	findings := `{"findings":[{"file":"a.txt","line":1,"severity":"warning","action":"auto-fix","description":"tidy"}],"reviewed_paths":["a.txt"],"risk_level":"low","risk_rationale":"tidy finding","risk_scope":"source-or-external"}`
 	ag := &mockAgent{
 		name: "budget-probe",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -237,7 +243,7 @@ func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
 			if len(calls) == 1 || len(calls) == 3 {
 				return &agent.Result{Output: json.RawMessage(findings)}, nil
 			}
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"reviewed_paths":["feature.txt"],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}, nil
 		},
 	}
 
@@ -443,7 +449,7 @@ func TestReviewStep_FixMode(t *testing.T) {
 				return &agent.Result{Output: json.RawMessage(`{"summary":"  'address review findings.'  "}`)}, nil
 			}
 			// Review call — return clean findings
-			findings := Findings{Items: []Finding{}, Summary: "all clear", RiskLevel: "low", RiskRationale: "all clear", RiskScope: types.FindingsRiskScopeSourceOrExternal}
+			findings := Findings{Items: []Finding{}, Summary: "all clear", ReviewedPaths: []string{"feature.txt"}, RiskLevel: "low", RiskRationale: "all clear", RiskScope: types.FindingsRiskScopeSourceOrExternal}
 			j, _ := json.Marshal(findings)
 			return &agent.Result{Output: j}, nil
 		},
@@ -554,7 +560,7 @@ func TestReviewStep_SourceContentFindingFollowsNormalFixFlow(t *testing.T) {
 					Action:      types.ActionAutoFix,
 					File:        "app_test.go",
 					Description: "new test only greps implementation source for a required token",
-				}}, RiskLevel: "low", RiskRationale: "source finding", RiskScope: types.FindingsRiskScopeSourceOrExternal})
+				}}, ReviewedPaths: []string{"app_test.go"}, RiskLevel: "low", RiskRationale: "source finding", RiskScope: types.FindingsRiskScopeSourceOrExternal})
 				return &agent.Result{Output: output}, nil
 			case 2:
 				assertTestQualityRulePrompt(t, opts.Prompt)
@@ -607,7 +613,7 @@ func TestReviewStep_ConcurrentHeadResetCannotGainApproval(t *testing.T) {
 		name: "test",
 		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
 			gitCmd(t, dir, "reset", "--hard", divergentHead)
-			findings, _ := json.Marshal(Findings{Items: []Finding{}, Summary: "all clear", RiskLevel: "low", RiskRationale: "all clear", RiskScope: types.FindingsRiskScopeSourceOrExternal})
+			findings, _ := json.Marshal(Findings{Items: []Finding{}, Summary: "all clear", ReviewedPaths: []string{"feature.txt"}, RiskLevel: "low", RiskRationale: "all clear", RiskScope: types.FindingsRiskScopeSourceOrExternal})
 			return &agent.Result{Output: findings}, nil
 		},
 	}
@@ -1305,6 +1311,7 @@ func TestReviewStep_RereviewFlagsIntentContradictionAsAskUser(t *testing.T) {
 					Action:      types.ActionAskUser,
 					Description: "the fix deletes the intent-required guarded stale-lock removal, leaving rejected retry-only",
 				}},
+				ReviewedPaths: []string{"feature.txt"},
 				RiskLevel:     "high",
 				RiskRationale: "intent contradicted",
 				RiskScope:     types.FindingsRiskScopeSourceOrExternal,

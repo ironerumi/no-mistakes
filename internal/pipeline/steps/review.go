@@ -404,7 +404,8 @@ func parseReviewAnalyzerOutput(result *agent.Result) (Findings, error) {
 		return findings, errors.New("review analyzer returned no structured findings")
 	}
 	var payload struct {
-		Findings *[]json.RawMessage `json:"findings"`
+		Findings      *[]json.RawMessage `json:"findings"`
+		ReviewedPaths *[]string          `json:"reviewed_paths"`
 	}
 	if err := json.Unmarshal(result.Output, &payload); err != nil {
 		return findings, fmt.Errorf("validate review analyzer findings: %w", err)
@@ -419,6 +420,9 @@ func parseReviewAnalyzerOutput(result *agent.Result) (Findings, error) {
 	findings.RiskScope = strings.TrimSpace(findings.RiskScope)
 	if findings.RiskLevel == "" || strings.TrimSpace(findings.RiskRationale) == "" || findings.RiskScope == "" {
 		return findings, errors.New("review analyzer findings missing risk assessment")
+	}
+	if payload.ReviewedPaths == nil {
+		return findings, errors.New("review analyzer findings missing reviewed_paths")
 	}
 	switch findings.RiskLevel {
 	case "low", "medium", "high":
