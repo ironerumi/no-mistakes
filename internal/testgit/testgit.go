@@ -38,22 +38,27 @@ func gitLocations() []string {
 		return []string{"/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"}
 	}
 
-	locations := make([]string, 0, 6)
+	locations := make([]string, 0, 8)
+	seen := make(map[string]struct{}, 8)
 	appendRoot := func(root string) {
 		if root == "" || !filepath.IsAbs(root) {
 			return
 		}
-		locations = append(locations,
+		for _, p := range []string{
 			filepath.Join(root, "Git", "cmd", "git.exe"),
 			filepath.Join(root, "Git", "bin", "git.exe"),
-		)
+		} {
+			if _, ok := seen[p]; ok {
+				continue
+			}
+			seen[p] = struct{}{}
+			locations = append(locations, p)
+		}
 	}
 
-	programFiles := os.Getenv("ProgramFiles")
-	if programFiles == "" {
-		programFiles = `C:\Program Files`
-	}
-	appendRoot(programFiles)
+	appendRoot(os.Getenv("ProgramFiles"))
+	appendRoot(`C:\Program Files`)
 	appendRoot(os.Getenv("ProgramFiles(x86)"))
+	appendRoot(`C:\Program Files (x86)`)
 	return locations
 }
