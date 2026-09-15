@@ -90,6 +90,9 @@ AI code review of your diff. This is probabilistic evidence, not a security or c
 - Diffs the base commit against head
 - Filters out files matching `ignore_patterns` from the repo config
 - Sends the filtered diff to the agent with structured review instructions and a structured output schema
+- Requires every review response to include `reviewed_paths`, the exact changed files the turn actually examined and judged; an empty array is valid, but omitted coverage cannot verify a finding
+- Keeps the review gate's findings as an append-only outstanding set across fix rounds. A selected finding is removed only when a later rereview positively covers its file in `reviewed_paths` and no longer reports the defect; silence, omitted coverage, a re-reported defect, a reworded defect at the same location, and a file-less finding remain outstanding. Explicit approve, skip, or abort resolves the gate instead
+- Bounds the review fix loop at three fix rounds, or two consecutive fix rounds that leave the outstanding findings unchanged. At either stop, it adds an `ask-user` stop finding and re-parks the gate without starting another fix round; the round count and stop marker survive daemon recovery
 - When the reviewer's final output is rejected, reruns a fresh, session-free review with the same prompt plus a note quoting the validation error, up to three attempts in total.
   It reruns when the agent adapter marks that output as rejected against the schema, which covers Pi when its final JSON fails validation (for example a missing required `risk_level`, or `tested` given as a boolean) and opencode once its own internal StructuredOutput retries run out, and when Review's own checks refuse the output.
   Claude Code's `--json-schema` re-prompts within its own limit and reports exhaustion as `error_max_structured_output_retries`; that result is not marked as a rejection, so it fails the step as before.
