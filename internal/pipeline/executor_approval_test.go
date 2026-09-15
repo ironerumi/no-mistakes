@@ -294,6 +294,73 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	}
 }
 
+func TestExecutor_ResumeCappedReviewRefusesAnotherFixRound(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	stepResult, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(stepResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-loop-stop","severity":"warning","description":"review stopped","action":"ask-user"}],"summary":"stopped"}`
+	if err := database.SetStepFindings(stepResult.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	for round := 1; round <= reviewFixRoundLimit+1; round++ {
+		trigger := "initial"
+		if round > 1 {
+			trigger = "auto_fix"
+		}
+		if _, err := database.InsertReviewStepRound(stepResult.ID, round, trigger, &findings, nil, "1111111111111111111111111111111111111111", 25); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusFixReview, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		calls++
+		return nil, fmt.Errorf("capped review executed another fix round")
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: reviewFixRoundLimit}}, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- exec.Resume(context.Background(), run, repo, t.TempDir()) }()
+
+	respondWhenParked(t, exec, types.StepReview, types.ActionFix, nil)
+	respondWhenParked(t, exec, types.StepReview, types.ActionApprove, nil)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Resume() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovered executor timed out")
+	}
+	if calls != 0 {
+		t.Fatalf("capped review executed %d fix rounds, want 0", calls)
+	}
+	rounds, err := database.GetRoundsByStep(stepResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != reviewFixRoundLimit+1 {
+		t.Fatalf("recovered rounds = %d, want %d", len(rounds), reviewFixRoundLimit+1)
+	}
+}
+
 func TestExecutor_ResumePromotesDurableReviewedCandidateOnApproval(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
