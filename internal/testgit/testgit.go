@@ -23,7 +23,7 @@ import (
 // shadowed itself on PATH ahead of the real tool.
 func RealGit() (string, error) {
 	for _, p := range []string{"/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"} {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && fi.Mode()&0111 != 0 {
 			return p, nil
 		}
 	}
