@@ -190,6 +190,58 @@ func TestExecutor_RestartsValidationFromRequestedStep(t *testing.T) {
 	}
 }
 
+func TestExecutor_RevalidationDoesNotRestoreReviewFindings(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	reviewCalls := 0
+	review := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		reviewCalls++
+		if reviewCalls == 1 {
+			return &StepOutcome{
+				NeedsApproval: true,
+				Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"old finding","action":"ask-user"}],"summary":"1 finding"}`,
+			}, nil
+		}
+		return &StepOutcome{}, nil
+	}}
+	ciCalls := 0
+	ci := &adaptiveCallStep{name: types.StepCI, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		ciCalls++
+		switch ciCalls {
+		case 1:
+			return &StepOutcome{
+				NeedsApproval: true,
+				AutoFixable:   true,
+				Findings:      `{"findings":[{"id":"ci-1","severity":"error","description":"test failed","action":"auto-fix"}],"summary":"1 finding"}`,
+			}, nil
+		case 2:
+			if !sctx.Fixing {
+				t.Error("CI repair round did not run as a fix")
+			}
+			return &StepOutcome{RestartFrom: types.StepReview}, nil
+		default:
+			return &StepOutcome{}, nil
+		}
+	}}
+
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{CI: 1}}, nil, []Step{
+		review,
+		newPassStep(types.StepTest),
+		ci,
+	}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+
+	if reviewCalls != 2 {
+		t.Fatalf("review executions = %d, want initial review plus revalidation", reviewCalls)
+	}
+}
+
 func TestExecutor_RevalidationGateRemainsRecoverable(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

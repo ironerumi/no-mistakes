@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -134,6 +135,43 @@ func TestExecutor_ReviewCarryForward_NoOpFixKeepsFindingParked(t *testing.T) {
 // once the rereview positively records that it covered the finding's file and
 // no longer reports the defect. Without this the carry set could only grow and
 // a verified fix would park forever.
+func TestExecutor_ReviewCarryForward_AutoFixFindingStillBlocksAfterNoOp(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	rounds := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			rounds++
+			if rounds == 1 {
+				return &StepOutcome{
+					AutoFixable:   true,
+					NeedsApproval: true,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"service.go","description":"nil deref","action":"auto-fix"}],"summary":"1 finding"}`,
+				}, nil
+			}
+			return &StepOutcome{}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+
+	parked, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parked.Status == types.RunCompleted {
+		t.Fatal("run completed with an unresolved carried auto-fix finding")
+	}
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+}
+
 func TestExecutor_ReviewCarryForward_PositiveCoverageClearsFinding(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

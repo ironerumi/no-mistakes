@@ -273,6 +273,17 @@ func hasAskUserFindingsJSON(raw string) bool {
 	return types.HasAskUserFindings(findings)
 }
 
+func hasActionableFindingsJSON(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return false
+	}
+	return types.HasActionableFindings(findings)
+}
+
 // reviewFixRoundLimit bounds the review step's fix-round loop. It is the loop
 // budget the executor enforces: once this many fix rounds have run, the step
 // stops looping and parks on an explicit ask-user finding instead of starting

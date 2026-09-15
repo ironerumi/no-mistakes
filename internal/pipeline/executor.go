@@ -223,6 +223,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 
 	// Execute steps sequentially. A late repair may send the same run back
 	// through validation before any new head is published.
+	revalidating := false
 	for i := 0; i < len(e.steps); i++ {
 		step := e.steps[i]
 		if ctx.Err() != nil {
@@ -240,6 +241,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		state, err := e.durableExecutionState(sr.ID)
 		if err != nil {
 			return e.failRun(run, repo, fmt.Errorf("restore step %s execution state: %w", step.Name(), err), ctx)
+		}
+		if revalidating && step.Name() == types.StepReview {
+			state.outstandingFindings = ""
 		}
 		skipRemaining, restartFrom, err := e.executeStep(ctx, step, sr, run, repo, workDir, logDir, state)
 		if err != nil {
@@ -261,6 +265,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 			if err != nil {
 				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", step.Name(), restartFrom), ctx)
 			}
+			revalidating = true
 			i = restartIndex - 1
 		}
 	}
@@ -653,6 +658,9 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 		state, stateErr := e.durableExecutionState(results[index].ID)
 		if stateErr != nil {
 			return e.failRun(run, repo, fmt.Errorf("restore step %s execution state: %w", e.steps[index].Name(), stateErr), ctx)
+		}
+		if revalidating && e.steps[index].Name() == types.StepReview {
+			state.outstandingFindings = ""
 		}
 		skipRemaining, restartFrom, err := e.executeStep(ctx, e.steps[index], results[index], run, repo, workDir, logDir, state)
 		if err != nil {
@@ -1096,7 +1104,7 @@ rounds:
 			}
 		}
 
-		if !outcome.NeedsApproval && !hasAskUserFindingsJSON(effectiveFindings) {
+		if !outcome.NeedsApproval && !hasActionableFindingsJSON(effectiveFindings) {
 			// Step completed without needing approval.
 			// Any remaining info-only or non-blocking findings
 			// are acceptable and don't block the pipeline.
