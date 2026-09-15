@@ -278,10 +278,15 @@ func TestReviewLoop_ParkRespondFixKeepsRoleSessions(t *testing.T) {
 			reviewRound++
 			if reviewRound == 1 {
 				return &agent.Result{Output: []byte(
-					`{"findings":[{"id":"f-1","severity":"error","description":"needs decision","action":"ask-user"}],"summary":"1 issue","risk_level":"high","risk_rationale":"gate","risk_scope":"source-or-external"}`,
+					`{"findings":[{"id":"f-1","severity":"error","file":"service.go","description":"needs decision","action":"ask-user"}],"summary":"1 issue","risk_level":"high","risk_rationale":"gate","risk_scope":"source-or-external"}`,
 				)}
 			}
-			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}
+			// The rereview positively covers the file the selected finding lives
+			// in and no longer reports the defect: that coverage record is what
+			// lets the carried finding leave the outstanding set. A rereview that
+			// reports nothing new without covering the file would leave it
+			// outstanding and park the run again.
+			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external","reviewed_paths":["service.go"]}`)}
 		default:
 			return &agent.Result{Output: []byte(`{"summary":"apply decision"}`)}
 		}
