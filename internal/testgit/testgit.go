@@ -10,6 +10,8 @@ package testgit
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -21,11 +23,37 @@ import (
 // list of well-known install locations means PATH is never consulted, so
 // neither a wrapper nor the fake CLI can ever be selected.
 func RealGit() (string, error) {
-	locations := []string{"/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"}
+	locations := gitLocations()
 	for _, p := range locations {
-		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && fi.Mode()&0111 != 0 {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() &&
+			(runtime.GOOS == "windows" || fi.Mode()&0111 != 0) {
 			return p, nil
 		}
 	}
 	return "", fmt.Errorf("testgit: real git not found in standard locations (%s)", strings.Join(locations, ", "))
+}
+
+func gitLocations() []string {
+	if runtime.GOOS != "windows" {
+		return []string{"/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"}
+	}
+
+	locations := make([]string, 0, 6)
+	appendRoot := func(root string) {
+		if root == "" || !filepath.IsAbs(root) {
+			return
+		}
+		locations = append(locations,
+			filepath.Join(root, "Git", "cmd", "git.exe"),
+			filepath.Join(root, "Git", "bin", "git.exe"),
+		)
+	}
+
+	programFiles := os.Getenv("ProgramFiles")
+	if programFiles == "" {
+		programFiles = `C:\Program Files`
+	}
+	appendRoot(programFiles)
+	appendRoot(os.Getenv("ProgramFiles(x86)"))
+	return locations
 }
