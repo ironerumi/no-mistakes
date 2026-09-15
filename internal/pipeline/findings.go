@@ -2,6 +2,10 @@ package pipeline
 
 import (
 	"encoding/json"
+	"fmt"
+	"path"
+	"strconv"
+	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -25,6 +29,26 @@ func findingIDsJSON(raw string) string {
 		ids = append(ids, item.ID)
 	}
 	return marshalFindingIDs(ids)
+}
+
+// findingIDList extracts the finding IDs from a findings JSON payload as a
+// plain slice (no JSON encoding), for selection bookkeeping like the review
+// loop's pending-verification set.
+func findingIDList(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(findings.Items))
+	for _, item := range findings.Items {
+		if item.ID != "" {
+			ids = append(ids, item.ID)
+		}
+	}
+	return ids
 }
 
 // marshalFindingIDs encodes a list of finding IDs as a JSON array. Empty
@@ -247,6 +271,219 @@ func hasAskUserFindingsJSON(raw string) bool {
 		return false
 	}
 	return types.HasAskUserFindings(findings)
+}
+
+// reviewFixRoundLimit bounds the review step's fix-round loop. It is the loop
+// budget the executor enforces: once this many fix rounds have run, the step
+// stops looping and parks on an explicit ask-user finding instead of starting
+// another round, so a review that never converges is a bounded, reportable
+// stop rather than an open-ended burn (issue #269 reached fifteen rounds).
+//
+// The other two stop conditions are deliberately not extra counters: a round
+// that adds no new findings and resolves none is detected as a stalled round
+// (reviewStalledRoundLimit), and the per-invocation agent budget
+// (review_agent_timeout) plus the automatic-round budget (auto_fix.review)
+// already bound each individual round. This mirrors open-code-review's
+// MAX_REVIEW_ROUNDS shape (1/2/3 by effort) rather than its machinery.
+const reviewFixRoundLimit = 3
+
+// reviewStalledRoundLimit is how many consecutive review fix rounds may leave
+// the outstanding set byte-identical (no new findings, nothing positively
+// resolved) before the loop stops and parks. One stalled round is often a
+// no-op fixer turn worth retrying with different guidance; two prove repeating
+// the same invitation is not converging.
+const reviewStalledRoundLimit = 2
+
+// reviewLoopStopReason reports why the review fix-round loop must not start
+// another round. An empty string means the loop may continue.
+func reviewLoopStopReason(fixRounds, stalledRounds int) string {
+	switch {
+	case fixRounds >= reviewFixRoundLimit:
+		return fmt.Sprintf("review reached its %d-fix-round cap", reviewFixRoundLimit)
+	case stalledRounds >= reviewStalledRoundLimit:
+		return fmt.Sprintf("%d consecutive review fix rounds added no new findings and resolved none", stalledRounds)
+	default:
+		return ""
+	}
+}
+
+// reviewLoopStopFindingsJSON renders the bounded stop as an explicit ask-user
+// finding, so a capped or stalled review parks for a human decision on the
+// still-outstanding findings instead of silently completing or burning another
+// round. The finding has no file and is therefore never verified away; only
+// approve, skip, or abort clears it.
+func reviewLoopStopFindingsJSON(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	encoded, err := types.MarshalFindingsJSON(types.Findings{
+		Items: []types.Finding{{
+			ID:          "review-loop-stop",
+			Severity:    types.FindingSeverityWarning,
+			Description: "Review stopped looping: " + reason + ". The outstanding findings above are still unresolved. Decide: approve to ship as-is, skip the step, abort, or select specific findings for another fix.",
+			Action:      types.ActionAskUser,
+		}},
+		Summary:       "review fix-round loop stopped: " + reason,
+		RiskLevel:     "high",
+		RiskRationale: reason,
+		RiskScope:     types.FindingsRiskScopeSourceOrExternal,
+	})
+	if err != nil {
+		return ""
+	}
+	return encoded
+}
+
+// reviewedPathsJSON extracts a review round's coverage record (the files the
+// turn actually examined) from its raw findings payload.
+func reviewedPathsJSON(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return nil
+	}
+	return findings.ReviewedPaths
+}
+
+// normalizeCoveredPath canonicalizes a reviewed or finding path for coverage
+// comparison. A mismatch (including a finding with no file at all) fails the
+// verification closed: the item simply stays outstanding.
+func normalizeCoveredPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	cleaned := path.Clean(value)
+	if cleaned == "." {
+		return ""
+	}
+	return cleaned
+}
+
+// resolveVerifiedFindingsJSON returns outstandingRaw minus every finding whose
+// ID is in pendingIDs and for which this round is a POSITIVE verification
+// record: the round listed the finding's file in its ReviewedPaths coverage,
+// and the round's own output (thisRoundRaw) no longer reports the defect.
+//
+// This is the only way a selected-and-fixed finding leaves the outstanding set
+// besides an explicit operator action (approve/skip/abort). A file the round
+// did not list, a missing coverage record, a finding with no file, or a round
+// that re-reports the defect all leave the item in place: silence, or a round
+// that did not look, is never resolution. That is the P1 this closes - the
+// predecessor dropped a selected finding the moment its fix was requested, so
+// a no-op fix could let the run complete with the defect unresolved.
+func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, reviewedPaths []string, thisRoundRaw string) string {
+	if outstandingRaw == "" || len(pendingIDs) == 0 || len(reviewedPaths) == 0 {
+		return outstandingRaw
+	}
+	outstanding, err := types.ParseFindingsJSON(outstandingRaw)
+	if err != nil {
+		return outstandingRaw
+	}
+	pending := make(map[string]bool, len(pendingIDs))
+	for _, id := range pendingIDs {
+		if id != "" {
+			pending[id] = true
+		}
+	}
+	if len(pending) == 0 {
+		return outstandingRaw
+	}
+	covered := make(map[string]bool, len(reviewedPaths))
+	for _, reviewed := range reviewedPaths {
+		if normalized := normalizeCoveredPath(reviewed); normalized != "" {
+			covered[normalized] = true
+		}
+	}
+	if len(covered) == 0 {
+		return outstandingRaw
+	}
+	thisRound, _ := types.ParseFindingsJSON(thisRoundRaw)
+	reported := make(map[types.Finding]bool, len(thisRound.Items))
+	for _, item := range thisRound.Items {
+		reported[findingKey(item)] = true
+	}
+	outstandingCounts := countFindingFingerprints(outstanding.Items)
+	thisRoundCounts := countFindingFingerprints(thisRound.Items)
+	result := types.FindingsMetadata(outstanding)
+	for _, item := range outstanding.Items {
+		if pending[item.ID] && covered[normalizeCoveredPath(item.File)] && !hasFindingMatch(item, reported, outstandingCounts, thisRoundCounts) {
+			continue
+		}
+		result.Items = append(result.Items, item)
+	}
+	if len(result.Items) == len(outstanding.Items) {
+		return outstandingRaw
+	}
+	if len(result.Items) == 0 {
+		return ""
+	}
+	encoded, err := types.MarshalFindingsJSON(result)
+	if err != nil {
+		return outstandingRaw
+	}
+	return encoded
+}
+
+// mergeOutstandingFindingsJSON merges one review round's output into the
+// append-only outstanding set.
+//
+// Two things make it more than mergeFindingsJSON: the merged set keeps only
+// one item per ID (this round's positional normalization can re-mint an ID an
+// outstanding item already holds, and the outstanding item's ID is what
+// `axi respond --findings <id>` selects, so the colliding NEW item is
+// re-minted instead), and the merged payload carries this round's coverage
+// record rather than the outstanding set's stale copy.
+//
+// Identity is still content-derived: a reworded restatement of an existing
+// finding does not match its original and is appended as a second item. That
+// is accepted rather than fixed here - it over-blocks instead of dropping
+// anything, and stable finding identity is a separate design pass (Parts 2+3
+// of the scout report).
+func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string) string {
+	if additionalRaw == "" {
+		return existingRaw
+	}
+	mergedRaw := mergeFindingsJSON(existingRaw, additionalRaw)
+	if mergedRaw == "" {
+		return ""
+	}
+	merged, err := types.ParseFindingsJSON(mergedRaw)
+	if err != nil {
+		return mergedRaw
+	}
+	merged.ReviewedPaths = reviewedPathsJSON(additionalRaw)
+	seen := make(map[string]bool, len(merged.Items))
+	changed := false
+	for i := range merged.Items {
+		id := merged.Items[i].ID
+		if id != "" && !seen[id] {
+			seen[id] = true
+			continue
+		}
+		merged.Items[i].ID = nextFreeReviewFindingID(seen)
+		seen[merged.Items[i].ID] = true
+		changed = true
+	}
+	if !changed && len(merged.ReviewedPaths) == 0 {
+		return mergedRaw
+	}
+	encoded, err := types.MarshalFindingsJSON(merged)
+	if err != nil {
+		return mergedRaw
+	}
+	return encoded
+}
+
+func nextFreeReviewFindingID(seen map[string]bool) string {
+	for i := 1; ; i++ {
+		id := "review-" + strconv.Itoa(i)
+		if !seen[id] {
+			return id
+		}
+	}
 }
 
 // combineSelectedFindingIDs returns the ordered list of finding IDs that

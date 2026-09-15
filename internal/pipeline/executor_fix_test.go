@@ -531,10 +531,13 @@ func TestExecutor_FixClearsStoredFindingsAfterSuccessfulReRun(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"severity":"error","description":"first pass issue","action":"auto-fix"}],"summary":"1 issue"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"main.go","description":"first pass issue","action":"auto-fix"}],"summary":"1 issue"}`,
 				}, nil
 			}
-			return &StepOutcome{}, nil
+			// A selected finding leaves the outstanding set only on a positive
+			// coverage record: the rereview names the file it re-checked and no
+			// longer reports the defect. An empty rereview on its own clears nothing.
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}}, nil
 		},
 	}
 
@@ -546,7 +549,7 @@ func TestExecutor_FixClearsStoredFindingsAfterSuccessfulReRun(t *testing.T) {
 	}()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionFix, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -780,9 +783,13 @@ func TestExecutor_AutoFixRecordsSelectedFindingIDs(t *testing.T) {
 	}
 
 	exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
-	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+
+	// The auto-fix round dispatched only the auto-fixable selection. The
+	// ask-user finding was never decided by anyone, so the append-only carry
+	// keeps it outstanding and the gate parks for the operator instead of the
+	// run completing: nothing leaves the outstanding set by silence.
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
 
 	dbSteps, err := database.GetStepsByRun(run.ID)
 	if err != nil {
@@ -808,6 +815,14 @@ func TestExecutor_AutoFixRecordsSelectedFindingIDs(t *testing.T) {
 	if rounds[1].FixSummary == nil || *rounds[1].FixSummary != "apply cheap fix" {
 		t.Fatalf("expected fix_summary persisted on round 2, got %v", rounds[1].FixSummary)
 	}
+	if dbSteps[0].FindingsJSON == nil || !strings.Contains(*dbSteps[0].FindingsJSON, "review-2") {
+		t.Fatalf("expected the undecided ask-user finding to stay outstanding, got %v", dbSteps[0].FindingsJSON)
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("respond: %v", err)
+	}
+	waitExecutorDone(t, done)
 }
 
 func TestRoundInsertIDClearsOnInsertFailure(t *testing.T) {

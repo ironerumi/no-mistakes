@@ -252,6 +252,15 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	}
 	close(releaseFix)
 	released = true
+	// The resumed rereview reports no new findings, and because the pending
+	// verification set is not recoverable across a restart it cannot positively
+	// clear the selected finding either. The append-only carry keeps it
+	// outstanding, so the gate parks again for the operator rather than the run
+	// completing on a fix that nothing verified.
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("respond to re-parked gate: %v", err)
+	}
 	select {
 	case err := <-done:
 		if err != nil {
