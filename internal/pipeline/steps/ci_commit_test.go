@@ -166,7 +166,7 @@ func TestCIStep_CommitAndPush_NoChanges(t *testing.T) {
 func TestCIStep_CommitAndPush_StaleDirtyStatusWithEmptyIndexIsNoOp(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	realGit, err := exec.LookPath("git")
+	realGit, err := testgit.RealGit()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestCIStep_CommitAndPush_StaleDirtyStatusWithEmptyIndexIsNoOp(t *testing.T)
 func TestCIStep_CommitAndPush_RealCommitFailureStillFails(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	realGit, err := exec.LookPath("git")
+	realGit, err := testgit.RealGit()
 	if err != nil {
 		t.Fatal(err)
 	}
