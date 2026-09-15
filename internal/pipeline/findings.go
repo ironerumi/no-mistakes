@@ -397,7 +397,7 @@ func reviewLoopStopFindingsJSON(reason string) string {
 		Items: []types.Finding{{
 			ID:          "review-loop-stop",
 			Severity:    types.FindingSeverityWarning,
-			Description: "Review stopped looping: " + reason + ". The outstanding findings above are still unresolved. Decide: approve to ship as-is, skip the step, abort, or select specific findings for another fix.",
+			Description: "Review stopped looping: " + reason + ". The outstanding findings above are still unresolved. Decide: approve to ship as-is, skip the step, or abort.",
 			Action:      types.ActionAskUser,
 		}},
 		Summary:       "review fix-round loop stopped: " + reason,

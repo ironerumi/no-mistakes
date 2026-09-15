@@ -514,10 +514,10 @@ func TestExecutor_TracksAutoFixTelemetry(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					AutoFixable: true,
-					Findings:    `{"findings":[{"severity":"error","description":"fix me","action":"auto-fix"}],"summary":"1 issue"}`,
+					Findings:    `{"findings":[{"severity":"error","file":"review.go","description":"fix me","action":"auto-fix"}],"summary":"1 issue"}`,
 				}, nil
 			}
-			return &StepOutcome{ExitCode: 0}, nil
+			return &StepOutcome{ReviewedPaths: []string{"review.go"}, ExitCode: 0}, nil
 		},
 	}
 

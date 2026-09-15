@@ -171,7 +171,7 @@ func TestExecutor_FixingEventIncludesFindingStats(t *testing.T) {
 	workDir := t.TempDir()
 	releaseFix := make(chan struct{})
 	callCount := 0
-	findings := `{"findings":[{"id":"r1","severity":"warning","description":"one","action":"auto-fix"},{"id":"r2","severity":"warning","description":"two","action":"auto-fix"}],"summary":"two"}`
+	findings := `{"findings":[{"id":"r1","severity":"warning","file":"one.go","description":"one","action":"auto-fix"},{"id":"r2","severity":"warning","file":"two.go","description":"two","action":"no-op"}],"summary":"two"}`
 	step := &adaptiveCallStep{
 		name: types.StepReview,
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
@@ -180,7 +180,7 @@ func TestExecutor_FixingEventIncludesFindingStats(t *testing.T) {
 				return &StepOutcome{NeedsApproval: true, Findings: findings}, nil
 			}
 			<-releaseFix
-			return &StepOutcome{}, nil
+			return &StepOutcome{ReviewedPaths: []string{"one.go"}}, nil
 		},
 	}
 
@@ -292,7 +292,13 @@ func TestExecutor_FixSetsPreviousFindings(t *testing.T) {
 	}()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	exec.Respond(types.StepReview, types.ActionFix, nil)
+	if err := exec.Respond(types.StepReview, types.ActionFix, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
 
 	select {
 	case err := <-done:
@@ -386,11 +392,11 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"parser.go","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","file":"other.go","description":"second","action":"no-op"}],"summary":"2 findings"}`,
 				}, nil
 			}
 			capturedFindings = sctx.PreviousFindings
-			return &StepOutcome{}, nil
+			return &StepOutcome{ReviewedPaths: []string{"parser.go", "logger.go"}}, nil
 		},
 	}
 
@@ -403,7 +409,7 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	instructions := map[string]string{"review-1": "only touch parser.go, skip helpers"}
-	added := []types.Finding{{Severity: "warning", Description: "also audit logger init", Action: types.ActionAutoFix}}
+	added := []types.Finding{{Severity: "warning", File: "logger.go", Description: "also audit logger init", Action: types.ActionAutoFix}}
 	if err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, instructions, added); err != nil {
 		t.Fatal(err)
 	}
@@ -481,11 +487,11 @@ func TestExecutor_FixUsesSelectedFindingIDsOnly(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"other.go","description":"first","action":"no-op"},{"id":"review-2","severity":"warning","file":"main.go","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
 				}, nil
 			}
 			capturedFindings = sctx.PreviousFindings
-			return &StepOutcome{}, nil
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}}, nil
 		},
 	}
 
@@ -583,10 +589,10 @@ func TestExecutor_FixPersistsFollowUpRoundAsAutoFix(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"severity":"error","description":"first pass issue","action":"auto-fix"}],"summary":"1 issue"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"main.go","description":"first pass issue","action":"auto-fix"}],"summary":"1 issue"}`,
 				}, nil
 			}
-			return &StepOutcome{}, nil
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}}, nil
 		},
 	}
 
@@ -598,7 +604,7 @@ func TestExecutor_FixPersistsFollowUpRoundAsAutoFix(t *testing.T) {
 	}()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionFix, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -647,11 +653,11 @@ func TestExecutor_FixSelectedFindingsRewritesSummary(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"other.go","description":"first","action":"no-op"},{"id":"review-2","severity":"warning","file":"main.go","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
 				}, nil
 			}
 			capturedFindings = sctx.PreviousFindings
-			return &StepOutcome{}, nil
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}}, nil
 		},
 	}
 
@@ -703,10 +709,10 @@ func TestExecutor_UserFixRecordsSelectedFindingIDsAndFixSummary(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"other.go","description":"first","action":"no-op"},{"id":"review-2","severity":"warning","file":"main.go","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
 				}, nil
 			}
-			return &StepOutcome{FixSummary: "fix the warning"}, nil
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}, FixSummary: "fix the warning"}, nil
 		},
 	}
 

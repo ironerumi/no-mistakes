@@ -151,11 +151,11 @@ func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 			reviewRound++
 			if reviewRound <= 2 {
 				return &agent.Result{Output: []byte(fmt.Sprintf(
-					`{"findings":[{"id":"f-%d","severity":"error","description":"bug %d","action":"auto-fix"}],"summary":"issues","risk_level":"medium","risk_rationale":"bugs","risk_scope":"source-or-external"}`,
-					reviewRound, reviewRound,
+					`{"findings":[{"id":"f-%d","severity":"error","file":"service-%d.go","description":"bug %d","action":"auto-fix"}],"summary":"issues","risk_level":"medium","risk_rationale":"bugs","risk_scope":"source-or-external"}`,
+					reviewRound, reviewRound, reviewRound,
 				))}
 			}
-			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}
+			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external","reviewed_paths":["service-1.go","service-2.go"]}`)}
 		case "review-fix":
 			return &agent.Result{Output: []byte(`{"summary":"fix the bug"}`)}
 		default:
@@ -239,10 +239,10 @@ func TestReviewLoop_RereviewNeverResumesTheSessionThatPrescribedItsFixes(t *test
 			reviewRound++
 			if reviewRound == 1 {
 				return &agent.Result{Output: []byte(
-					`{"findings":[{"id":"f-1","severity":"error","description":"prescribed design","action":"auto-fix"}],"summary":"1 issue","risk_level":"medium","risk_rationale":"bug","risk_scope":"source-or-external"}`,
+					`{"findings":[{"id":"f-1","severity":"error","file":"service.go","description":"prescribed design","action":"auto-fix"}],"summary":"1 issue","risk_level":"medium","risk_rationale":"bug","risk_scope":"source-or-external"}`,
 				)}
 			}
-			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}
+			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external","reviewed_paths":["service.go"]}`)}
 		case "review-fix":
 			return &agent.Result{Output: []byte(`{"summary":"implement the prescription"}`)}
 		default:

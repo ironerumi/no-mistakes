@@ -28,7 +28,7 @@ func TestExecutor_AutoFixTriggersWithoutApproval(t *testing.T) {
 				return &StepOutcome{
 					NeedsApproval: true,
 					AutoFixable:   true,
-					Findings:      `{"findings":[{"severity":"error","description":"bug","action":"auto-fix"}],"summary":"1 issue"}`,
+					Findings:      `{"findings":[{"severity":"error","file":"review.go","description":"bug","action":"auto-fix"}],"summary":"1 issue"}`,
 				}, nil
 			}
 			// After auto-fix, verify Fixing is set
@@ -38,7 +38,7 @@ func TestExecutor_AutoFixTriggersWithoutApproval(t *testing.T) {
 			if sctx.PreviousFindings == "" {
 				t.Error("expected PreviousFindings to be set on auto-fix")
 			}
-			return &StepOutcome{}, nil
+			return &StepOutcome{ReviewedPaths: []string{"review.go"}}, nil
 		},
 	}
 
@@ -309,14 +309,14 @@ func TestExecutor_AutoFixInfoFindings(t *testing.T) {
 				return &StepOutcome{
 					NeedsApproval: false,
 					AutoFixable:   true,
-					Findings:      `{"findings":[{"severity":"info","description":"could simplify","action":"auto-fix"}],"summary":"1 suggestion"}`,
+					Findings:      `{"findings":[{"severity":"info","file":"review.go","description":"could simplify","action":"auto-fix"}],"summary":"1 suggestion"}`,
 				}, nil
 			}
 			// After auto-fix, step passes clean
 			if !sctx.Fixing {
 				t.Error("expected Fixing to be true on auto-fix re-execution")
 			}
-			return &StepOutcome{}, nil
+			return &StepOutcome{ReviewedPaths: []string{"review.go"}}, nil
 		},
 	}
 
