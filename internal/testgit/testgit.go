@@ -10,57 +10,22 @@ package testgit
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
-// RealGit resolves the system git binary by absolute path, never the PATH
-// winner. It tries a fixed list of well-known install locations first and
-// only falls back to exec.LookPath("git") as a last resort; that fallback
-// result is rejected if it resolves inside a fake-CLI temp directory
-// (os.MkdirTemp("", "fakecli...")), since that can only mean a fake CLI
-// shadowed itself on PATH ahead of the real tool.
+// RealGit resolves the system git binary by absolute path only, never
+// consulting PATH: a wrapper (guard shim, audit wrapper, etc.) or the fake
+// CLI itself can win PATH, and either one being mistaken for "real git" is
+// what let fakecli and a wrapper forward into each other without bound
+// (github.com/ironerumi/no-mistakes#5). Restricting resolution to a fixed
+// list of well-known install locations means PATH is never consulted, so
+// neither a wrapper nor the fake CLI can ever be selected.
 func RealGit() (string, error) {
-	for _, p := range []string{"/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"} {
+	locations := []string{"/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"}
+	for _, p := range locations {
 		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && fi.Mode()&0111 != 0 {
 			return p, nil
 		}
 	}
-	p, err := exec.LookPath("git")
-	if err != nil {
-		return "", err
-	}
-	if looksLikeFakeCLIPath(p) {
-		return "", fmt.Errorf("testgit: PATH-resolved git %q resolves inside a fake CLI directory, refusing", p)
-	}
-	return p, nil
-}
-
-// looksLikeFakeCLIPath reports whether p resolves inside a fake CLI temp
-// directory (os.MkdirTemp("", "fakecli...")), the only way a PATH-derived
-// git fallback could actually be the fake CLI shadowing itself.
-func looksLikeFakeCLIPath(p string) bool {
-	tempDir, err := filepath.Abs(os.TempDir())
-	if err != nil {
-		return false
-	}
-	candidate, err := filepath.Abs(p)
-	if err != nil {
-		return false
-	}
-	relative, err := filepath.Rel(tempDir, candidate)
-	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return false
-	}
-
-	fakeDirName := relative
-	if i := strings.IndexByte(relative, filepath.Separator); i >= 0 {
-		fakeDirName = relative[:i]
-	}
-	if !strings.HasPrefix(fakeDirName, "fakecli") {
-		return false
-	}
-	info, err := os.Stat(filepath.Join(tempDir, fakeDirName))
-	return err == nil && info.IsDir()
+	return "", fmt.Errorf("testgit: real git not found in standard locations (%s)", strings.Join(locations, ", "))
 }

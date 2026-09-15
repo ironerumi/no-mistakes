@@ -33,21 +33,3 @@ func TestRealGit_IgnoresWrapperOnPATH(t *testing.T) {
 		t.Fatalf("RealGit() = %q, want /usr/bin/git", got)
 	}
 }
-
-func TestLooksLikeFakeCLIPath(t *testing.T) {
-	fakeDir, err := os.MkdirTemp("", "fakecli")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(fakeDir) })
-
-	if !looksLikeFakeCLIPath(filepath.Join(fakeDir, "git")) {
-		t.Fatalf("looksLikeFakeCLIPath(%q) = false, want true", filepath.Join(fakeDir, "git"))
-	}
-	if looksLikeFakeCLIPath("/usr/bin/git") {
-		t.Fatal("looksLikeFakeCLIPath(\"/usr/bin/git\") = true, want false")
-	}
-	if looksLikeFakeCLIPath("/opt/fakecli-tools/bin/git") {
-		t.Fatal("looksLikeFakeCLIPath(\"/opt/fakecli-tools/bin/git\") = true, want false")
-	}
-}
