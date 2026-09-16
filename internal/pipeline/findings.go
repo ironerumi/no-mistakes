@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -335,6 +336,82 @@ func retainFindingIDs(raw string, ids []string) []string {
 		if present[id] {
 			retained = append(retained, id)
 		}
+	}
+	return retained
+}
+
+// selectedFindingIdentities records, for every finding ID a round's
+// SelectedFindingIDs named, the content identity (findingKey) that ID
+// referred to AS OF that round's own FindingsJSON. Finding IDs are
+// positional and get re-minted for an unrelated finding once the original
+// is resolved and drops out of the outstanding set (mergeOutstandingFindingsJSON
+// hands a freed ID to the next new item via nextFreeReviewFindingID). A later
+// round's selection under the same ID legitimately overwrites an earlier
+// entry here, since that is the operator selecting a new finding that
+// happens to have inherited a freed ID.
+func selectedFindingIdentities(rounds []*db.StepRound) map[string]types.Finding {
+	identity := make(map[string]types.Finding)
+	for _, round := range rounds {
+		if round.SelectedFindingIDs == nil || round.FindingsJSON == nil {
+			continue
+		}
+		ids := findingIDsFromSelectionJSON(*round.SelectedFindingIDs)
+		if len(ids) == 0 {
+			continue
+		}
+		findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
+		if err != nil {
+			continue
+		}
+		byID := make(map[string]types.Finding, len(findings.Items))
+		for _, item := range findings.Items {
+			if item.ID != "" {
+				byID[item.ID] = item
+			}
+		}
+		for _, id := range ids {
+			if item, ok := byID[id]; ok {
+				identity[id] = item
+			}
+		}
+	}
+	return identity
+}
+
+// retainFindingIDsByIdentity is retainFindingIDs plus a content-identity
+// check: an ID only survives into the retained set when the finding it
+// currently names in latestRaw has the SAME content (findingKey) as the
+// finding selectedFindingIdentities recorded for it. This closes the
+// positional-ID-reuse hole retainFindingIDs alone cannot see - that a
+// finding is present under an old selected ID does not mean it is the SAME
+// finding the operator selected; ID reuse across rounds can alias an
+// unrelated later finding into looking selected. An ID with no recorded
+// identity (selectedFindingIdentities found no matching round) is retained
+// as before, matching prior behavior for callers that never recorded one.
+func retainFindingIDsByIdentity(latestRaw string, ids []string, identity map[string]types.Finding) []string {
+	if len(ids) == 0 || latestRaw == "" {
+		return nil
+	}
+	latest, err := types.ParseFindingsJSON(latestRaw)
+	if err != nil {
+		return append([]string(nil), ids...)
+	}
+	byID := make(map[string]types.Finding, len(latest.Items))
+	for _, item := range latest.Items {
+		if item.ID != "" {
+			byID[item.ID] = item
+		}
+	}
+	retained := make([]string, 0, len(ids))
+	for _, id := range ids {
+		current, ok := byID[id]
+		if !ok {
+			continue
+		}
+		if want, known := identity[id]; known && findingKey(current) != findingKey(want) {
+			continue
+		}
+		retained = append(retained, id)
 	}
 	return retained
 }

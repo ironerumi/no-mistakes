@@ -347,7 +347,8 @@ func (e *Executor) durableExecutionState(stepResultID string) (stepExecutionStat
 			state.selectedOutstandingIDs = combineFindingIDLists(state.selectedOutstandingIDs, findingIDsFromSelectionJSON(*round.SelectedFindingIDs))
 		}
 	}
-	state.selectedOutstandingIDs = retainFindingIDs(state.outstandingFindings, state.selectedOutstandingIDs)
+	identity := selectedFindingIdentities(rounds)
+	state.selectedOutstandingIDs = retainFindingIDsByIdentity(state.outstandingFindings, state.selectedOutstandingIDs, identity)
 	return state, nil
 }
 
@@ -633,6 +634,7 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, findingIDsFromSelectionJSON(*round.SelectedFindingIDs))
 				}
 			}
+			identity := selectedFindingIdentities(rounds)
 			gate = &recoveredGate{
 				index:                  index,
 				step:                   e.steps[index],
@@ -641,7 +643,7 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				round:                  latest.Round,
 				autoFixes:              autoFixes,
 				lastRoundID:            latest.ID,
-				selectedOutstandingIDs: retainFindingIDs(*result.FindingsJSON, selectedOutstandingIDs),
+				selectedOutstandingIDs: retainFindingIDsByIdentity(*result.FindingsJSON, selectedOutstandingIDs, identity),
 			}
 			if latest.ReviewedHeadSHA != nil {
 				gate.reviewedHeadSHA = *latest.ReviewedHeadSHA

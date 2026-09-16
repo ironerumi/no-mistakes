@@ -114,6 +114,58 @@ func TestReviewStep_UnrunAnalyzerDoesNotApprove(t *testing.T) {
 	}
 }
 
+// TestReviewStep_PartialReviewedPathsDoesNotGrantApproval closes the
+// Greptile P1 that a clean round (zero findings) with an EMPTY or PARTIAL
+// reviewed_paths could still certify the whole head, since NeedsApproval
+// was decided from hasBlockingFindings alone. Legacy behavior (no
+// reviewed_paths field at all) is preserved so making the field optional
+// does not regress a caller that never adopted it.
+func TestReviewStep_PartialReviewedPathsDoesNotGrantApproval(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name              string
+		output            json.RawMessage
+		wantNeedsApproval bool
+	}{
+		{
+			name:              "reviewed_paths absent behaves like legacy: clean findings approve",
+			output:            json.RawMessage(`{"findings":[],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`),
+			wantNeedsApproval: false,
+		},
+		{
+			name:              "reviewed_paths present but empty does not grant approval",
+			output:            json.RawMessage(`{"findings":[],"reviewed_paths":[],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`),
+			wantNeedsApproval: true,
+		},
+		{
+			name:              "reviewed_paths present and covering the reviewable set approves",
+			output:            json.RawMessage(`{"findings":[],"reviewed_paths":["feature.txt"],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`),
+			wantNeedsApproval: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			ag := &mockAgent{
+				name: "test",
+				runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					return &agent.Result{Output: tc.output}, nil
+				},
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+			outcome, err := (&ReviewStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if outcome.NeedsApproval != tc.wantNeedsApproval {
+				t.Fatalf("NeedsApproval = %v, want %v", outcome.NeedsApproval, tc.wantNeedsApproval)
+			}
+		})
+	}
+}
+
 func TestReviewStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
@@ -217,7 +269,7 @@ func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
 	}
 	var calls []call
 
-	findings := `{"findings":[{"file":"a.txt","line":1,"severity":"warning","action":"auto-fix","description":"tidy"}],"risk_level":"low","risk_rationale":"tidy finding","risk_scope":"source-or-external"}`
+	findings := `{"findings":[{"file":"feature.txt","line":1,"severity":"warning","action":"auto-fix","description":"tidy"}],"risk_level":"low","risk_rationale":"tidy finding","risk_scope":"source-or-external"}`
 	ag := &mockAgent{
 		name: "budget-probe",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -237,7 +289,12 @@ func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
 			if len(calls) == 1 || len(calls) == 3 {
 				return &agent.Result{Output: json.RawMessage(findings)}, nil
 			}
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}, nil
+			// The final rereview must report reviewed_paths covering the
+			// finding's file to positively clear it under the append-only
+			// carry-forward contract (see resolveVerifiedFindingsJSON):
+			// without a coverage record, a clean round leaves a selected
+			// finding outstanding and the step never completes.
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"reviewed_paths":["feature.txt"],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}, nil
 		},
 	}
 

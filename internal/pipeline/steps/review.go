@@ -380,6 +380,15 @@ Risk assessment (after listing all findings):
 	}
 
 	needsApproval := hasBlockingFindings(findings.Items)
+	if !needsApproval && findings.ReviewedPaths != nil && !reviewedPathsCoverReviewable(findings.ReviewedPaths, reviewable) {
+		// A legacy caller that omits reviewed_paths entirely keeps the
+		// pre-existing behavior above (findings.ReviewedPaths == nil is
+		// excluded from this branch). But once an agent DOES report
+		// reviewed_paths, it is held to covering every trusted reviewable
+		// path: an empty or partial list must not certify the whole head as
+		// reviewed just because it happened to report zero findings.
+		needsApproval = true
+	}
 	findingsJSON, _ := json.Marshal(findings)
 
 	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{

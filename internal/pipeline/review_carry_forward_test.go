@@ -678,3 +678,57 @@ func TestMergeOutstandingFindingsJSON_AppendsAndKeepsSelectionIdentity(t *testin
 		t.Fatalf("the outstanding item's identity was replaced by the colliding new one: %s", merged)
 	}
 }
+
+// TestRetainFindingIDsByIdentity_RejectsPositionalIDReuse closes the Greptile
+// P1 that recovery unions selected IDs from every historical round and then
+// retains any ID present in the LATEST findings, with no check that it is
+// the SAME finding. Finding IDs are positional and get re-minted for an
+// unrelated finding once the original drops out of the outstanding set
+// (mergeOutstandingFindingsJSON hands a freed ID to the next new item). An
+// old selection under a reused ID must not silently alias the new,
+// never-selected finding as "selected".
+func TestRetainFindingIDsByIdentity_RejectsPositionalIDReuse(t *testing.T) {
+	roundOneFindings := `{"findings":[{"id":"review-1","severity":"error","file":"service.go","description":"old carried issue","action":"ask-user"}],"summary":"1 finding"}`
+	roundOne := &db.StepRound{FindingsJSON: strPtr(roundOneFindings), SelectedFindingIDs: strPtr(`["review-1"]`)}
+
+	// The old finding resolved and dropped; a LATER, completely unrelated
+	// finding happens to be re-minted under the same freed ID and was never
+	// selected by the operator.
+	latestFindings := `{"findings":[{"id":"review-1","severity":"info","file":"unrelated.go","description":"a different, never-selected finding","action":"auto-fix"}],"summary":"1 finding"}`
+	roundTwo := &db.StepRound{FindingsJSON: strPtr(latestFindings), SelectedFindingIDs: nil}
+
+	rounds := []*db.StepRound{roundOne, roundTwo}
+	selected := combineFindingIDLists(nil, findingIDsFromSelectionJSON(*roundOne.SelectedFindingIDs))
+
+	// The unguarded helper only checks presence, so it wrongly keeps the ID -
+	// pinning why the identity-aware guard is required at all.
+	if plain := retainFindingIDs(latestFindings, selected); len(plain) != 1 || plain[0] != "review-1" {
+		t.Fatalf("retainFindingIDs (presence-only) = %v, want [review-1] to demonstrate the aliasing hazard it does not guard against", plain)
+	}
+
+	identity := selectedFindingIdentities(rounds)
+	got := retainFindingIDsByIdentity(latestFindings, selected, identity)
+	if len(got) != 0 {
+		t.Fatalf("retainFindingIDsByIdentity() = %v, want empty: the reused ID must not alias the unrelated new finding as selected", got)
+	}
+}
+
+// TestRetainFindingIDsByIdentity_KeepsGenuineSameFindingAcrossRounds proves
+// the identity guard does not over-block: an ID that still names the SAME
+// finding across rounds must remain retained.
+func TestRetainFindingIDsByIdentity_KeepsGenuineSameFindingAcrossRounds(t *testing.T) {
+	roundOneFindings := `{"findings":[{"id":"review-1","severity":"error","file":"service.go","description":"old carried issue","action":"ask-user"}],"summary":"1 finding"}`
+	roundOne := &db.StepRound{FindingsJSON: strPtr(roundOneFindings), SelectedFindingIDs: strPtr(`["review-1"]`)}
+	// Same finding, still outstanding in a later round under the same ID.
+	roundTwo := &db.StepRound{FindingsJSON: strPtr(roundOneFindings), SelectedFindingIDs: nil}
+
+	rounds := []*db.StepRound{roundOne, roundTwo}
+	selected := combineFindingIDLists(nil, findingIDsFromSelectionJSON(*roundOne.SelectedFindingIDs))
+	identity := selectedFindingIdentities(rounds)
+	got := retainFindingIDsByIdentity(roundOneFindings, selected, identity)
+	if len(got) != 1 || got[0] != "review-1" {
+		t.Fatalf("retainFindingIDsByIdentity() = %v, want [review-1] retained for the genuinely same finding", got)
+	}
+}
+
+func strPtr(v string) *string { return &v }

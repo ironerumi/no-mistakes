@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"strings"
 	"unicode/utf8"
 
@@ -77,6 +78,43 @@ func hasBlockingFindings(items []Finding) bool {
 		}
 	}
 	return false
+}
+
+// reviewedPathsCoverReviewable reports whether reviewedPaths (a review turn's
+// self-reported coverage) includes every path in reviewablePaths. An empty
+// reviewablePaths set trivially counts as covered. Comparison is by cleaned
+// path so "./x" and "x" match; this deliberately does not accept a superset
+// mismatch as failure - only a genuinely missing reviewable path fails
+// closed.
+func reviewedPathsCoverReviewable(reviewedPaths, reviewablePaths []string) bool {
+	if len(reviewablePaths) == 0 {
+		return true
+	}
+	covered := make(map[string]bool, len(reviewedPaths))
+	for _, reviewed := range reviewedPaths {
+		if normalized := normalizeReviewedPath(reviewed); normalized != "" {
+			covered[normalized] = true
+		}
+	}
+	for _, candidate := range reviewablePaths {
+		normalized := normalizeReviewedPath(candidate)
+		if normalized == "" || !covered[normalized] {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeReviewedPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	cleaned := path.Clean(value)
+	if cleaned == "." {
+		return ""
+	}
+	return cleaned
 }
 
 // assertPipelineHeadContinuity fails closed when the worktree HEAD is no longer

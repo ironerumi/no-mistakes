@@ -1554,7 +1554,7 @@ func TestReviewFindingsSchema_ValidJSON(t *testing.T) {
 	if !ok {
 		t.Fatal("expected 'required' array in schema")
 	}
-	want := map[string]bool{"findings": false, "reviewed_paths": false, "risk_level": false, "risk_rationale": false, "risk_scope": false}
+	want := map[string]bool{"findings": false, "risk_level": false, "risk_rationale": false, "risk_scope": false}
 	for _, r := range required {
 		s, _ := r.(string)
 		want[s] = true
@@ -1562,6 +1562,22 @@ func TestReviewFindingsSchema_ValidJSON(t *testing.T) {
 	for field, found := range want {
 		if !found {
 			t.Errorf("missing required field %q in schema", field)
+		}
+	}
+	// reviewed_paths is a recognized property but is deliberately NOT
+	// required: a caller that omits it keeps the pre-carry-forward behavior
+	// instead of failing schema validation, so recorded eval/replay
+	// fixtures that predate the field are not broken by its addition.
+	props, ok := parsed["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected 'properties' object in schema")
+	}
+	if _, ok := props["reviewed_paths"]; !ok {
+		t.Error("reviewFindingsSchema missing reviewed_paths property")
+	}
+	for _, r := range required {
+		if r == "reviewed_paths" {
+			t.Error("reviewed_paths must not be required, to preserve backward compatibility with callers that omit it")
 		}
 	}
 }
