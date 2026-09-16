@@ -180,7 +180,7 @@ func TestExecutor_FixingEventIncludesFindingStats(t *testing.T) {
 				return &StepOutcome{NeedsApproval: true, Findings: findings}, nil
 			}
 			<-releaseFix
-			return &StepOutcome{ReviewedPaths: []string{"one.go"}}, nil
+			return &StepOutcome{ReviewedPaths: []string{"one.go"}, ReviewablePaths: []string{"one.go"}}, nil
 		},
 	}
 
@@ -284,7 +284,7 @@ func TestExecutor_FixSetsPreviousFindings(t *testing.T) {
 			}
 			// Second call (fix): capture PreviousFindings and pass
 			capturedFindings = sctx.PreviousFindings
-			return &StepOutcome{ReviewedPaths: []string{"main.go"}}, nil
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}}, nil
 		},
 	}
 
@@ -398,7 +398,7 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 				}, nil
 			}
 			capturedFindings = sctx.PreviousFindings
-			return &StepOutcome{ReviewedPaths: []string{"main.go"}}, nil
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}}, nil
 		},
 	}
 
@@ -497,7 +497,7 @@ func TestExecutor_FixUsesSelectedFindingIDsOnly(t *testing.T) {
 				}, nil
 			}
 			capturedFindings = sctx.PreviousFindings
-			return &StepOutcome{ReviewedPaths: []string{"other.go"}}, nil
+			return &StepOutcome{ReviewedPaths: []string{"other.go"}, ReviewablePaths: []string{"other.go"}}, nil
 		},
 	}
 
@@ -553,7 +553,7 @@ func TestExecutor_FixClearsStoredFindingsAfterSuccessfulReRun(t *testing.T) {
 			// A selected finding leaves the outstanding set only on a positive
 			// coverage record: the rereview names the file it re-checked and no
 			// longer reports the defect. An empty rereview on its own clears nothing.
-			return &StepOutcome{ReviewedPaths: []string{"main.go"}}, nil
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}}, nil
 		},
 	}
 
@@ -602,7 +602,7 @@ func TestExecutor_FixPersistsFollowUpRoundAsAutoFix(t *testing.T) {
 					Findings:      `{"findings":[{"severity":"error","file":"main.go","description":"first pass issue","action":"auto-fix"}],"summary":"1 issue"}`,
 				}, nil
 			}
-			return &StepOutcome{ReviewedPaths: []string{"main.go"}}, nil
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}}, nil
 		},
 	}
 
@@ -671,7 +671,7 @@ func TestExecutor_FixSelectedFindingsRewritesSummary(t *testing.T) {
 				}, nil
 			}
 			capturedFindings = sctx.PreviousFindings
-			return &StepOutcome{ReviewedPaths: []string{"other.go"}}, nil
+			return &StepOutcome{ReviewedPaths: []string{"other.go"}, ReviewablePaths: []string{"other.go"}}, nil
 		},
 	}
 
@@ -730,7 +730,7 @@ func TestExecutor_UserFixRecordsSelectedFindingIDsAndFixSummary(t *testing.T) {
 					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"main.go","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","file":"other.go","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
 				}, nil
 			}
-			return &StepOutcome{FixSummary: "fix the warning", ReviewedPaths: []string{"other.go"}}, nil
+			return &StepOutcome{FixSummary: "fix the warning", ReviewedPaths: []string{"other.go"}, ReviewablePaths: []string{"other.go"}}, nil
 		},
 	}
 
@@ -806,7 +806,7 @@ func TestExecutor_AutoFixRecordsSelectedFindingIDs(t *testing.T) {
 					Findings:    `{"findings":[{"id":"review-1","severity":"warning","file":"main.go","description":"a","action":"auto-fix"},{"id":"review-2","severity":"warning","file":"other.go","description":"b","action":"ask-user"}],"summary":"2"}`,
 				}, nil
 			}
-			return &StepOutcome{FixSummary: "apply cheap fix", ReviewedPaths: []string{"main.go"}}, nil
+			return &StepOutcome{FixSummary: "apply cheap fix", ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}}, nil
 		},
 	}
 

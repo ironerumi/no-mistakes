@@ -142,6 +142,11 @@ func TestReviewStep_PartialReviewedPathsDoesNotGrantApproval(t *testing.T) {
 			output:            json.RawMessage(`{"findings":[],"reviewed_paths":["feature.txt"],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`),
 			wantNeedsApproval: false,
 		},
+		{
+			name:              "reviewed_paths with an out-of-scope path does not approve",
+			output:            json.RawMessage(`{"findings":[],"reviewed_paths":["feature.txt","fabricated.txt"],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`),
+			wantNeedsApproval: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

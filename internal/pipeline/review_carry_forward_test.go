@@ -713,6 +713,24 @@ func TestRetainFindingIDsByIdentity_RejectsPositionalIDReuse(t *testing.T) {
 	}
 }
 
+func TestRetainFindingIDsByIdentity_UsesUserFindingIdentity(t *testing.T) {
+	userFindings := `{"findings":[{"id":"user-1","severity":"warning","file":"old.go","description":"selected user finding","action":"auto-fix","source":"user"}],"summary":"1 finding"}`
+	round := &db.StepRound{
+		UserFindingsJSON:   strPtr(userFindings),
+		SelectedFindingIDs: strPtr(`["user-1"]`),
+	}
+	latestFindings := `{"findings":[{"id":"user-1","severity":"info","file":"new.go","description":"unrelated later finding","action":"no-op"}],"summary":"1 finding"}`
+
+	identity := selectedFindingIdentities([]*db.StepRound{round})
+	if _, ok := identity["user-1"]; !ok {
+		t.Fatal("selected user finding identity was not recovered from user_findings_json")
+	}
+	got := retainFindingIDsByIdentity(latestFindings, []string{"user-1"}, identity)
+	if len(got) != 0 {
+		t.Fatalf("retainFindingIDsByIdentity() = %v, want empty for reused user finding ID", got)
+	}
+}
+
 // TestRetainFindingIDsByIdentity_KeepsGenuineSameFindingAcrossRounds proves
 // the identity guard does not over-block: an ID that still names the SAME
 // finding across rounds must remain retained.

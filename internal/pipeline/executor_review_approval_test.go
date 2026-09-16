@@ -42,7 +42,7 @@ func TestExecutor_FullRereviewReplacesApprovalWithoutAuthorizingParkedRound(t *t
 				ReviewApprovedHeadSHA: firstReviewedHead,
 			}, nil
 		}
-		return &StepOutcome{ReviewedPaths: []string{"main.go"}, ReviewApprovedHeadSHA: rereviewedHead}, nil
+		return &StepOutcome{ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}, ReviewApprovedHeadSHA: rereviewedHead}, nil
 	}}
 	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
 	workDir := t.TempDir()

@@ -81,24 +81,27 @@ func hasBlockingFindings(items []Finding) bool {
 }
 
 // reviewedPathsCoverReviewable reports whether reviewedPaths (a review turn's
-// self-reported coverage) includes every path in reviewablePaths. An empty
-// reviewablePaths set trivially counts as covered. Comparison is by cleaned
-// path so "./x" and "x" match; this deliberately does not accept a superset
-// mismatch as failure - only a genuinely missing reviewable path fails
-// closed.
+// self-reported coverage) exactly covers reviewablePaths. Comparison is by
+// cleaned path so "./x" and "x" match.
 func reviewedPathsCoverReviewable(reviewedPaths, reviewablePaths []string) bool {
-	if len(reviewablePaths) == 0 {
-		return true
+	allowed := make(map[string]bool, len(reviewablePaths))
+	for _, candidate := range reviewablePaths {
+		normalized := normalizeReviewedPath(candidate)
+		if normalized == "" {
+			return false
+		}
+		allowed[normalized] = true
 	}
 	covered := make(map[string]bool, len(reviewedPaths))
 	for _, reviewed := range reviewedPaths {
-		if normalized := normalizeReviewedPath(reviewed); normalized != "" {
-			covered[normalized] = true
+		normalized := normalizeReviewedPath(reviewed)
+		if normalized == "" || !allowed[normalized] {
+			return false
 		}
+		covered[normalized] = true
 	}
-	for _, candidate := range reviewablePaths {
-		normalized := normalizeReviewedPath(candidate)
-		if normalized == "" || !covered[normalized] {
+	for candidate := range allowed {
+		if !covered[candidate] {
 			return false
 		}
 	}

@@ -450,7 +450,7 @@ func TestExecutor_TracksAutoFixTelemetry(t *testing.T) {
 					Findings:    `{"findings":[{"severity":"error","file":"main.go","description":"fix me","action":"auto-fix"}],"summary":"1 issue"}`,
 				}, nil
 			}
-			return &StepOutcome{ExitCode: 0, ReviewedPaths: []string{"main.go"}}, nil
+			return &StepOutcome{ExitCode: 0, ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}}, nil
 		},
 	}
 

@@ -342,31 +342,42 @@ func retainFindingIDs(raw string, ids []string) []string {
 
 // selectedFindingIdentities records, for every finding ID a round's
 // SelectedFindingIDs named, the content identity (findingKey) that ID
-// referred to AS OF that round's own FindingsJSON. Finding IDs are
-// positional and get re-minted for an unrelated finding once the original
-// is resolved and drops out of the outstanding set (mergeOutstandingFindingsJSON
-// hands a freed ID to the next new item via nextFreeReviewFindingID). A later
-// round's selection under the same ID legitimately overwrites an earlier
-// entry here, since that is the operator selecting a new finding that
-// happens to have inherited a freed ID.
+// referred to as of that round's FindingsJSON, or its UserFindingsJSON when
+// the ID was not present in the primary findings. Finding IDs are positional
+// and get re-minted for an unrelated finding once the original is resolved
+// and drops out of the outstanding set. A later round's selection under the
+// same ID legitimately overwrites an earlier entry here, since that is the
+// operator selecting a new finding that happens to have inherited a freed ID.
 func selectedFindingIdentities(rounds []*db.StepRound) map[string]types.Finding {
 	identity := make(map[string]types.Finding)
 	for _, round := range rounds {
-		if round.SelectedFindingIDs == nil || round.FindingsJSON == nil {
+		if round.SelectedFindingIDs == nil {
 			continue
 		}
 		ids := findingIDsFromSelectionJSON(*round.SelectedFindingIDs)
 		if len(ids) == 0 {
 			continue
 		}
-		findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
-		if err != nil {
-			continue
+
+		byID := make(map[string]types.Finding)
+		if round.FindingsJSON != nil {
+			if findings, err := types.ParseFindingsJSON(*round.FindingsJSON); err == nil {
+				for _, item := range findings.Items {
+					if item.ID != "" {
+						byID[item.ID] = item
+					}
+				}
+			}
 		}
-		byID := make(map[string]types.Finding, len(findings.Items))
-		for _, item := range findings.Items {
-			if item.ID != "" {
-				byID[item.ID] = item
+		if round.UserFindingsJSON != nil {
+			if findings, err := types.ParseFindingsJSON(*round.UserFindingsJSON); err == nil {
+				for _, item := range findings.Items {
+					if item.ID != "" {
+						if _, exists := byID[item.ID]; !exists {
+							byID[item.ID] = item
+						}
+					}
+				}
 			}
 		}
 		for _, id := range ids {
@@ -381,20 +392,16 @@ func selectedFindingIdentities(rounds []*db.StepRound) map[string]types.Finding 
 // retainFindingIDsByIdentity is retainFindingIDs plus a content-identity
 // check: an ID only survives into the retained set when the finding it
 // currently names in latestRaw has the SAME content (findingKey) as the
-// finding selectedFindingIdentities recorded for it. This closes the
-// positional-ID-reuse hole retainFindingIDs alone cannot see - that a
-// finding is present under an old selected ID does not mean it is the SAME
-// finding the operator selected; ID reuse across rounds can alias an
-// unrelated later finding into looking selected. An ID with no recorded
-// identity (selectedFindingIdentities found no matching round) is retained
-// as before, matching prior behavior for callers that never recorded one.
+// finding selectedFindingIdentities recorded for it. An ID with no recorded
+// identity is not retained because recovery cannot prove that it still names
+// the finding the operator selected.
 func retainFindingIDsByIdentity(latestRaw string, ids []string, identity map[string]types.Finding) []string {
 	if len(ids) == 0 || latestRaw == "" {
 		return nil
 	}
 	latest, err := types.ParseFindingsJSON(latestRaw)
 	if err != nil {
-		return append([]string(nil), ids...)
+		return nil
 	}
 	byID := make(map[string]types.Finding, len(latest.Items))
 	for _, item := range latest.Items {
@@ -408,7 +415,8 @@ func retainFindingIDsByIdentity(latestRaw string, ids []string, identity map[str
 		if !ok {
 			continue
 		}
-		if want, known := identity[id]; known && findingKey(current) != findingKey(want) {
+		want, known := identity[id]
+		if !known || findingKey(current) != findingKey(want) {
 			continue
 		}
 		retained = append(retained, id)

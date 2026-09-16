@@ -38,7 +38,7 @@ func TestExecutor_AutoFixTriggersWithoutApproval(t *testing.T) {
 			if sctx.PreviousFindings == "" {
 				t.Error("expected PreviousFindings to be set on auto-fix")
 			}
-			return &StepOutcome{ReviewedPaths: []string{"main.go"}}, nil
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}}, nil
 		},
 	}
 
@@ -316,7 +316,7 @@ func TestExecutor_AutoFixInfoFindings(t *testing.T) {
 			if !sctx.Fixing {
 				t.Error("expected Fixing to be true on auto-fix re-execution")
 			}
-			return &StepOutcome{ReviewedPaths: []string{"main.go"}}, nil
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}}, nil
 		},
 	}
 
