@@ -246,7 +246,7 @@ func TestResolveVerifiedFindingsJSON_FilelessFindingIsNeverVerifiedAway(t *testi
 }
 
 func TestRemapFindingIDsJSON_UsesRemintedAutomaticSelection(t *testing.T) {
-	merged := mergeOutstandingFindingsJSON(reviewCarryTwoFindings, `{"findings":[{"id":"review-1","severity":"error","file":"other.go","description":"new automatic defect","action":"auto-fix"}],"summary":"1 finding"}`)
+	merged := mergeOutstandingFindingsJSON(reviewCarryTwoFindings, `{"findings":[{"id":"review-1","severity":"error","file":"other.go","description":"new automatic defect","action":"auto-fix"}],"summary":"1 finding"}`, nil)
 	selected := autoFixableFindingsJSON(`{"findings":[{"id":"review-1","severity":"error","file":"other.go","description":"new automatic defect","action":"auto-fix"}],"summary":"1 finding"}`)
 	remapped := remapFindingIDsJSON(merged, selected)
 	parsed, err := types.ParseFindingsJSON(remapped)
@@ -262,8 +262,27 @@ func TestRemapFindingIDsJSON_UsesRemintedAutomaticSelection(t *testing.T) {
 // append-only merge: the accumulated set is never reduced, an item keeps its
 // ID (the selector `axi respond --findings <id>` uses), and a colliding new ID
 // is re-minted rather than silently replacing the outstanding item.
+func TestMergeOutstandingFindingsJSON_UsesCurrentReviewedPathsWhenRoundIsEmpty(t *testing.T) {
+	prior := `{"findings":[` +
+		`{"id":"review-1","severity":"error","file":"service.go","description":"old issue","action":"ask-user"},` +
+		`{"id":"review-2","severity":"warning","file":"cache.go","description":"still outstanding","action":"ask-user"}],` +
+		`"reviewed_paths":["old.go"]}`
+
+	merged := mergeOutstandingFindingsJSON(prior, "", []string{"current.go"})
+	parsed, err := types.ParseFindingsJSON(merged)
+	if err != nil {
+		t.Fatalf("parse merged findings: %v", err)
+	}
+	if len(parsed.Items) != 2 {
+		t.Fatalf("merged findings = %d, want 2", len(parsed.Items))
+	}
+	if len(parsed.ReviewedPaths) != 1 || parsed.ReviewedPaths[0] != "current.go" {
+		t.Fatalf("reviewed paths = %v, want [current.go]", parsed.ReviewedPaths)
+	}
+}
+
 func TestMergeOutstandingFindingsJSON_AppendsAndKeepsSelectionIdentity(t *testing.T) {
-	merged := mergeOutstandingFindingsJSON(reviewCarryTwoFindings, `{"findings":[{"id":"review-1","severity":"info","file":"other.go","description":"restated as a new item","action":"ask-user"}],"summary":"1 finding"}`)
+	merged := mergeOutstandingFindingsJSON(reviewCarryTwoFindings, `{"findings":[{"id":"review-1","severity":"info","file":"other.go","description":"restated as a new item","action":"ask-user"}],"summary":"1 finding"}`, nil)
 	if !strings.Contains(merged, "service.go") || !strings.Contains(merged, "cache.go") {
 		t.Fatalf("append-only merge dropped an outstanding finding: %s", merged)
 	}
