@@ -272,17 +272,73 @@ func hasAskUserFindingsJSON(raw string) bool {
 	return types.HasAskUserFindings(findings)
 }
 
-func hasBlockingFindingsJSON(raw string) bool {
+func findingIDsFromSelectionJSON(raw string) []string {
 	if raw == "" {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+		return nil
+	}
+	return ids
+}
+
+func combineFindingIDLists(existing, additional []string) []string {
+	result := append([]string(nil), existing...)
+	seen := make(map[string]bool, len(result))
+	for _, id := range result {
+		if id != "" {
+			seen[id] = true
+		}
+	}
+	for _, id := range additional {
+		if id != "" && !seen[id] {
+			result = append(result, id)
+			seen[id] = true
+		}
+	}
+	return result
+}
+
+func retainFindingIDs(raw string, ids []string) []string {
+	if len(ids) == 0 || raw == "" {
+		return nil
+	}
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return append([]string(nil), ids...)
+	}
+	present := make(map[string]bool, len(findings.Items))
+	for _, item := range findings.Items {
+		if item.ID != "" {
+			present[item.ID] = true
+		}
+	}
+	retained := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if present[id] {
+			retained = append(retained, id)
+		}
+	}
+	return retained
+}
+
+func hasSelectedFindingsJSON(raw string, ids []string) bool {
+	if len(ids) == 0 || raw == "" {
 		return false
 	}
 	findings, err := types.ParseFindingsJSON(raw)
 	if err != nil {
-		return false
+		return true
 	}
+	present := make(map[string]bool, len(findings.Items))
 	for _, item := range findings.Items {
-		switch types.NormalizeFindingSeverity(item.Severity) {
-		case types.FindingSeverityError, types.FindingSeverityWarning:
+		if item.ID != "" {
+			present[item.ID] = true
+		}
+	}
+	for _, id := range ids {
+		if present[id] {
 			return true
 		}
 	}

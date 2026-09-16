@@ -1,3 +1,4 @@
+// Temporary validation-only scaffolding pending #1092.
 // Package testgit resolves the real system git binary for tests that spawn
 // a fake CLI on PATH (see internal/pipeline/fakecli). It exists because
 // exec.LookPath("git") returns the PATH winner, not necessarily real git: if
