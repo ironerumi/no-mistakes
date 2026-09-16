@@ -1230,7 +1230,8 @@ rounds:
 					// P1 that let a no-op fix complete a run with the defect
 					// unresolved.
 					outstandingFindings = mergeOutstandingFindingsJSON(effectiveFindings, mergedFindings, nil)
-					newPendingIDs := combineSelectedFindingIDs(response.findingIDs, mergedFindings)
+					remappedSelected := remapFindingIDsJSON(outstandingFindings, mergedFindings)
+					newPendingIDs := combineSelectedFindingIDs(response.findingIDs, remappedSelected)
 					pendingVerificationIDs = combineFindingIDLists(pendingVerificationIDs, newPendingIDs)
 					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, newPendingIDs)
 				}

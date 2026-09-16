@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -183,6 +184,69 @@ func TestExecutor_ReviewCarryForward_UserAddedFindingStaysOutstanding(t *testing
 	waitExecutorDone(t, done)
 }
 
+func TestExecutor_ReviewCarryForward_RemintsUserAddedCollisionForPendingVerification(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	round := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			round++
+			if round == 1 {
+				return &StepOutcome{
+					NeedsApproval: true,
+					Findings: `{"findings":[` +
+						`{"id":"user-1","severity":"warning","file":"old.go","description":"old carried issue","action":"ask-user"},` +
+						`{"id":"review-1","severity":"error","file":"service.go","description":"selected issue","action":"ask-user"}],"summary":"2 findings"}`,
+				}, nil
+			}
+			return &StepOutcome{
+				NeedsApproval: true,
+				ReviewedPaths: []string{"service.go", "new.go"},
+			}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	added := []types.Finding{{
+		ID:          "user-1",
+		Severity:    types.FindingSeverityInfo,
+		File:        "new.go",
+		Description: "new user note",
+		Action:      types.ActionNoOp,
+	}}
+	if err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, nil, added); err != nil {
+		t.Fatalf("fix with colliding user finding: %v", err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps[0].FindingsJSON == nil {
+		t.Fatal("expected the unselected carried finding to remain outstanding")
+	}
+	parsed, err := types.ParseFindingsJSON(*steps[0].FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse outstanding findings: %v", err)
+	}
+	for _, item := range parsed.Items {
+		if item.Description == "new user note" {
+			t.Fatalf("reminted user finding was not tracked for verification: %s", *steps[0].FindingsJSON)
+		}
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	waitExecutorDone(t, done)
+}
+
 func TestExecutor_ReviewCarryForward_PendingSelectionsSurviveLaterRounds(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
@@ -220,14 +284,29 @@ func TestExecutor_ReviewCarryForward_PendingSelectionsSurviveLaterRounds(t *test
 	done, _ := startExecutor(t, exec, run, repo, workDir)
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	waitForRounds := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			steps, err := database.GetStepsByRun(run.ID)
+			if err == nil && len(steps) > 0 {
+				rounds, roundsErr := database.GetRoundsByStep(steps[0].ID)
+				if roundsErr == nil && len(rounds) >= want && steps[0].Status == types.StepStatusFixReview {
+					return
+				}
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		t.Fatalf("review did not reach round %d", want)
+	}
 	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
 		t.Fatal(err)
 	}
-	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	waitForRounds(2)
 	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-2"}); err != nil {
 		t.Fatal(err)
 	}
-	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	waitForRounds(3)
 
 	steps, err := database.GetStepsByRun(run.ID)
 	if err != nil {
