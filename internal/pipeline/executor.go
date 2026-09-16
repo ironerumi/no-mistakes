@@ -300,13 +300,14 @@ func (e *Executor) initializeRunScopes(runID string) {
 }
 
 type stepExecutionState struct {
-	fixing           bool
-	previousFindings string
-	deferredFindings string
-	roundNum         int
-	autoFixAttempts  int
-	executionMS      int64
-	currentRoundID   string
+	fixing                 bool
+	previousFindings       string
+	deferredFindings       string
+	roundNum               int
+	autoFixAttempts        int
+	executionMS            int64
+	currentRoundID         string
+	selectedOutstandingIDs []string
 	// outstandingFindings is the review step's append-only set of findings that
 	// are not yet positively resolved or explicitly decided. It is persisted as
 	// the parked round's findings_json, so recovering a parked gate restores the
@@ -328,19 +329,24 @@ func (e *Executor) durableExecutionState(stepResultID string) (stepExecutionStat
 		if round.FindingsJSON != nil {
 			state.outstandingFindings = *round.FindingsJSON
 		}
+		if round.SelectedFindingIDs != nil {
+			state.selectedOutstandingIDs = combineFindingIDLists(state.selectedOutstandingIDs, findingIDsFromSelectionJSON(*round.SelectedFindingIDs))
+		}
 	}
+	state.selectedOutstandingIDs = retainFindingIDs(state.outstandingFindings, state.selectedOutstandingIDs)
 	return state, nil
 }
 
 type recoveredGate struct {
-	index           int
-	step            Step
-	stepResult      *db.StepResult
-	findings        string
-	round           int
-	autoFixes       int
-	lastRoundID     string
-	reviewedHeadSHA string
+	index                  int
+	step                   Step
+	stepResult             *db.StepResult
+	findings               string
+	round                  int
+	autoFixes              int
+	lastRoundID            string
+	reviewedHeadSHA        string
+	selectedOutstandingIDs []string
 }
 
 func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
@@ -525,14 +531,15 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFixing), "", "", nil)
 		skipRemaining, restartFrom, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, stepExecutionState{
-			fixing:              true,
-			previousFindings:    merged,
-			deferredFindings:    removeMatchingFindingsJSON(gate.findings, selected),
-			outstandingFindings: gate.findings,
-			roundNum:            gate.round,
-			autoFixAttempts:     gate.autoFixes,
-			executionMS:         duration,
-			currentRoundID:      gate.lastRoundID,
+			fixing:                 true,
+			previousFindings:       merged,
+			deferredFindings:       removeMatchingFindingsJSON(gate.findings, selected),
+			outstandingFindings:    gate.findings,
+			selectedOutstandingIDs: gate.selectedOutstandingIDs,
+			roundNum:               gate.round,
+			autoFixAttempts:        gate.autoFixes,
+			executionMS:            duration,
+			currentRoundID:         gate.lastRoundID,
 		})
 		if err != nil {
 			return e.failRun(run, repo, err, ctx)
@@ -587,19 +594,24 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				return nil, fmt.Errorf("recovered approval gate findings are incomplete")
 			}
 			autoFixes := 0
+			selectedOutstandingIDs := []string{}
 			for _, round := range rounds {
 				if round.SelectionSource != nil && *round.SelectionSource == db.RoundSelectionSourceAutoFix {
 					autoFixes++
 				}
+				if round.SelectedFindingIDs != nil {
+					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, findingIDsFromSelectionJSON(*round.SelectedFindingIDs))
+				}
 			}
 			gate = &recoveredGate{
-				index:       index,
-				step:        e.steps[index],
-				stepResult:  result,
-				findings:    *result.FindingsJSON,
-				round:       latest.Round,
-				autoFixes:   autoFixes,
-				lastRoundID: latest.ID,
+				index:                  index,
+				step:                   e.steps[index],
+				stepResult:             result,
+				findings:               *result.FindingsJSON,
+				round:                  latest.Round,
+				autoFixes:              autoFixes,
+				lastRoundID:            latest.ID,
+				selectedOutstandingIDs: retainFindingIDs(*result.FindingsJSON, selectedOutstandingIDs),
 			}
 			if latest.ReviewedHeadSHA != nil {
 				gate.reviewedHeadSHA = *latest.ReviewedHeadSHA
@@ -835,10 +847,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// operator resolves it at a gate. pendingVerificationIDs names the
 	// selection the NEXT round is verifying. The loop itself is bounded only by
 	// auto_fix.review (the automatic-round budget) and the human/agent gate,
-	// same as upstream. Unused by every other step.
+	// same as upstream. Repeated user selections remain operator/driver-owned,
+	// rather than receiving a separate code-level round cap. Unused by every other step.
 	carryFindings := stepName == types.StepReview
 	outstandingFindings := ""
 	var pendingVerificationIDs []string
+	selectedOutstandingIDs := state.selectedOutstandingIDs
 	if carryFindings {
 		outstandingFindings = state.outstandingFindings
 	}
@@ -976,6 +990,7 @@ rounds:
 			// set only on a positive coverage record that also no longer reports
 			// the defect.
 			outstandingFindings = resolveVerifiedFindingsJSON(outstandingFindings, pendingVerificationIDs, outcome.ReviewedPaths, roundFindings)
+			selectedOutstandingIDs = retainFindingIDs(outstandingFindings, selectedOutstandingIDs)
 			pendingVerificationIDs = nil
 			effectiveFindings = mergeOutstandingFindingsJSON(outstandingFindings, roundFindings)
 			outstandingFindings = effectiveFindings
@@ -1059,13 +1074,14 @@ rounds:
 				sctx.DeferredFindings = removeMatchingFindingsJSON(effectiveFindings, fixableFindings)
 				if carryFindings {
 					pendingVerificationIDs = findingIDList(fixableFindings)
+					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, pendingVerificationIDs)
 				}
 				nextTrigger = "auto_fix"
 				continue rounds
 			}
 		}
 
-		if !outcome.NeedsApproval && !hasAskUserFindingsJSON(effectiveFindings) && (!carryFindings || !hasBlockingFindingsJSON(effectiveFindings)) {
+		if !outcome.NeedsApproval && !hasAskUserFindingsJSON(effectiveFindings) && (!carryFindings || !hasSelectedFindingsJSON(effectiveFindings, selectedOutstandingIDs)) {
 			// Step completed without needing approval.
 			// Any remaining info-only or non-blocking findings
 			// are acceptable and don't block the pipeline.
@@ -1196,6 +1212,7 @@ rounds:
 					// P1 that let a no-op fix complete a run with the defect
 					// unresolved.
 					pendingVerificationIDs = combineSelectedFindingIDs(response.findingIDs, mergedFindings)
+					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, pendingVerificationIDs)
 				}
 				nextTrigger = "auto_fix"
 				if currentRoundID != "" {
