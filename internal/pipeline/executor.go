@@ -998,7 +998,7 @@ rounds:
 			outstandingFindings = resolveVerifiedFindingsJSON(outstandingFindings, pendingVerificationIDs, outcome.ReviewedPaths, roundFindings)
 			selectedOutstandingIDs = retainFindingIDs(outstandingFindings, selectedOutstandingIDs)
 			pendingVerificationIDs = nil
-			effectiveFindings = mergeOutstandingFindingsJSON(outstandingFindings, roundFindings)
+			effectiveFindings = mergeOutstandingFindingsJSON(outstandingFindings, roundFindings, outcome.ReviewedPaths)
 			outstandingFindings = effectiveFindings
 		}
 

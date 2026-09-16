@@ -393,19 +393,6 @@ func remapFindingIDsJSON(mergedRaw, selectedRaw string) string {
 	return remapped
 }
 
-// reviewedPathsJSON extracts a review round's coverage record (the files the
-// turn actually examined) from its raw findings payload.
-func reviewedPathsJSON(raw string) []string {
-	if raw == "" {
-		return nil
-	}
-	findings, err := types.ParseFindingsJSON(raw)
-	if err != nil {
-		return nil
-	}
-	return findings.ReviewedPaths
-}
-
 // normalizeCoveredPath canonicalizes a reviewed or finding path for coverage
 // comparison. A mismatch (including a finding with no file at all) fails the
 // verification closed: the item simply stays outstanding.
@@ -514,9 +501,21 @@ func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, rev
 // is accepted rather than fixed here - it over-blocks instead of dropping
 // anything, and stable finding identity is a separate design pass (Parts 2+3
 // of the scout report).
-func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string) string {
+func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string, reviewedPaths []string) string {
 	if additionalRaw == "" {
-		return existingRaw
+		if existingRaw == "" {
+			return ""
+		}
+		findings, err := types.ParseFindingsJSON(existingRaw)
+		if err != nil {
+			return existingRaw
+		}
+		findings.ReviewedPaths = append([]string(nil), reviewedPaths...)
+		encoded, err := types.MarshalFindingsJSON(findings)
+		if err != nil {
+			return existingRaw
+		}
+		return encoded
 	}
 	mergedRaw := mergeFindingsJSON(existingRaw, additionalRaw)
 	if mergedRaw == "" {
@@ -526,9 +525,8 @@ func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string) string {
 	if err != nil {
 		return mergedRaw
 	}
-	merged.ReviewedPaths = reviewedPathsJSON(additionalRaw)
+	merged.ReviewedPaths = append([]string(nil), reviewedPaths...)
 	seen := make(map[string]bool, len(merged.Items))
-	changed := false
 	for i := range merged.Items {
 		id := merged.Items[i].ID
 		if id != "" && !seen[id] {
@@ -537,10 +535,6 @@ func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string) string {
 		}
 		merged.Items[i].ID = nextFreeReviewFindingID(seen)
 		seen[merged.Items[i].ID] = true
-		changed = true
-	}
-	if !changed && len(merged.ReviewedPaths) == 0 {
-		return mergedRaw
 	}
 	encoded, err := types.MarshalFindingsJSON(merged)
 	if err != nil {
