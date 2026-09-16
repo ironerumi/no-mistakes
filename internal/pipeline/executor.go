@@ -529,9 +529,20 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		selected := filterFindingsJSON(gate.findings, response.findingIDs)
 		merged := mergeUserOverridesJSON(selected, response.instructions, response.addedFindings)
 		selectedForPersistence := merged
+		outstandingFindings := gate.findings
+		selectedOutstandingIDs := gate.selectedOutstandingIDs
 		if gate.step.Name() == types.StepReview {
-			mergedOutstanding := mergeOutstandingFindingsJSON(gate.findings, merged, nil)
-			selectedForPersistence = remapFindingIDsJSON(mergedOutstanding, merged)
+			// APPEND-ONLY: mirror the live path (see the ActionFix case in
+			// executeStep) so a resumed fix round carries the same merged
+			// outstanding set and post-remap selected IDs as an in-process
+			// one. Resuming with the pre-response gate.findings/
+			// gate.selectedOutstandingIDs would strand a newly selected
+			// finding without verification and could silently drop a
+			// remapped user-added finding from the outstanding set.
+			outstandingFindings = mergeOutstandingFindingsJSON(gate.findings, merged, nil)
+			selectedForPersistence = remapFindingIDsJSON(outstandingFindings, merged)
+			newSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
+			selectedOutstandingIDs = combineFindingIDLists(gate.selectedOutstandingIDs, newSelectedIDs)
 		}
 		if gate.lastRoundID != "" {
 			allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
@@ -553,8 +564,8 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			fixing:                 true,
 			previousFindings:       merged,
 			deferredFindings:       removeMatchingFindingsJSON(gate.findings, selected),
-			outstandingFindings:    gate.findings,
-			selectedOutstandingIDs: gate.selectedOutstandingIDs,
+			outstandingFindings:    outstandingFindings,
+			selectedOutstandingIDs: selectedOutstandingIDs,
 			roundNum:               gate.round,
 			autoFixAttempts:        gate.autoFixes,
 			executionMS:            duration,
