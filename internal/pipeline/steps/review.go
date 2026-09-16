@@ -163,7 +163,8 @@ Previous review findings to address:
 	}
 	changed := changedPathList(changedFiles)
 
-	if len(reviewablePaths(changed, sctx.Config.IgnorePatterns)) == 0 {
+	reviewable := reviewablePaths(changed, sctx.Config.IgnorePatterns)
+	if len(reviewable) == 0 {
 		sctx.Log("no changes to review")
 		noChangeFindings := Findings{
 			RiskLevel:     "low",
@@ -174,8 +175,9 @@ Previous review findings to address:
 		noChangeFindings.ReviewedPaths = nil
 		findingsJSON, _ := json.Marshal(noChangeFindings)
 		return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
-			Findings:   string(findingsJSON),
-			FixSummary: fixSummary,
+			Findings:        string(findingsJSON),
+			ReviewablePaths: reviewable,
+			FixSummary:      fixSummary,
 		})
 	}
 
@@ -381,11 +383,12 @@ Risk assessment (after listing all findings):
 	findingsJSON, _ := json.Marshal(findings)
 
 	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
-		NeedsApproval: needsApproval,
-		AutoFixable:   len(findings.Items) > 0,
-		Findings:      string(findingsJSON),
-		ReviewedPaths: findings.ReviewedPaths,
-		FixSummary:    fixSummary,
+		NeedsApproval:   needsApproval,
+		AutoFixable:     len(findings.Items) > 0,
+		Findings:        string(findingsJSON),
+		ReviewedPaths:   findings.ReviewedPaths,
+		ReviewablePaths: reviewable,
+		FixSummary:      fixSummary,
 	})
 }
 

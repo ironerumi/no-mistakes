@@ -65,7 +65,7 @@ func TestExecutor_ReviewCarryForward_RecoverySeedsPendingVerification(t *testing
 	findings := `{"findings":[{"id":"review-1","severity":"error","file":"service.go","description":"selected issue","action":"ask-user"}],"summary":"1 finding"}`
 	stepResult, recoveredRun := seedRecoveredReviewGate(t, database, run, findings, types.StepStatusFixReview, `["review-1"]`)
 	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
-		return &StepOutcome{ReviewedPaths: []string{"service.go"}}, nil
+		return &StepOutcome{ReviewedPaths: []string{"service.go"}, ReviewablePaths: []string{"service.go"}}, nil
 	}}
 	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -110,7 +110,7 @@ func TestExecutor_ReviewCarryForward_RecoveryPersistsRemappedSelection(t *testin
 		`{"id":"review-1","severity":"error","file":"service.go","description":"selected issue","action":"ask-user"}],"summary":"2 findings"}`
 	_, recoveredRun := seedRecoveredReviewGate(t, database, run, findings, types.StepStatusAwaitingApproval, "")
 	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
-		return &StepOutcome{NeedsApproval: true, ReviewedPaths: []string{"service.go", "new.go"}}, nil
+		return &StepOutcome{NeedsApproval: true, ReviewedPaths: []string{"service.go", "new.go"}, ReviewablePaths: []string{"service.go", "new.go"}}, nil
 	}}
 	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -197,9 +197,10 @@ func TestExecutor_ReviewCarryForward_NoOpFixKeepsFindingParked(t *testing.T) {
 			round++
 			if round == 1 {
 				return &StepOutcome{
-					NeedsApproval: true,
-					Findings:      reviewCarryTwoFindings,
-					ReviewedPaths: []string{"service.go", "cache.go"},
+					NeedsApproval:   true,
+					Findings:        reviewCarryTwoFindings,
+					ReviewedPaths:   []string{"service.go", "cache.go"},
+					ReviewablePaths: []string{"service.go", "cache.go"},
 				}, nil
 			}
 			// The fixer writes a commit that does not fix the selected defect.
@@ -359,8 +360,9 @@ func TestExecutor_ReviewCarryForward_RemintsUserAddedCollisionForPendingVerifica
 				}, nil
 			}
 			return &StepOutcome{
-				NeedsApproval: true,
-				ReviewedPaths: []string{"service.go", "new.go"},
+				NeedsApproval:   true,
+				ReviewedPaths:   []string{"service.go", "new.go"},
+				ReviewablePaths: []string{"service.go", "new.go"},
 			}, nil
 		},
 	}
@@ -423,15 +425,17 @@ func TestExecutor_ReviewCarryForward_PendingSelectionsSurviveLaterRounds(t *test
 				}, nil
 			case 2:
 				return &StepOutcome{
-					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-2","severity":"warning","file":"cache.go","description":"unbounded cache","action":"ask-user"}],"summary":"1 finding"}`,
-					ReviewedPaths: []string{"cache.go"},
+					NeedsApproval:   true,
+					Findings:        `{"findings":[{"id":"review-2","severity":"warning","file":"cache.go","description":"unbounded cache","action":"ask-user"}],"summary":"1 finding"}`,
+					ReviewedPaths:   []string{"cache.go"},
+					ReviewablePaths: []string{"service.go", "cache.go"},
 				}, nil
 			default:
 				return &StepOutcome{
-					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-2","severity":"warning","file":"cache.go","description":"unbounded cache","action":"ask-user"}],"summary":"1 finding"}`,
-					ReviewedPaths: []string{"service.go"},
+					NeedsApproval:   true,
+					Findings:        `{"findings":[{"id":"review-2","severity":"warning","file":"cache.go","description":"unbounded cache","action":"ask-user"}],"summary":"1 finding"}`,
+					ReviewedPaths:   []string{"service.go"},
+					ReviewablePaths: []string{"service.go", "cache.go"},
 				}, nil
 			}
 		},
@@ -505,12 +509,13 @@ func TestExecutor_ReviewCarryForward_PositiveCoverageClearsFinding(t *testing.T)
 			round++
 			if round == 1 {
 				return &StepOutcome{
-					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"service.go","line":10,"description":"nil deref","action":"ask-user"}],"summary":"1 finding"}`,
-					ReviewedPaths: []string{"service.go"},
+					NeedsApproval:   true,
+					Findings:        `{"findings":[{"id":"review-1","severity":"error","file":"service.go","line":10,"description":"nil deref","action":"ask-user"}],"summary":"1 finding"}`,
+					ReviewedPaths:   []string{"service.go"},
+					ReviewablePaths: []string{"service.go"},
 				}, nil
 			}
-			return &StepOutcome{ReviewedPaths: []string{"service.go"}}, nil
+			return &StepOutcome{ReviewedPaths: []string{"service.go"}, ReviewablePaths: []string{"service.go"}}, nil
 		},
 	}
 
@@ -571,6 +576,8 @@ func TestResolveVerifiedFindingsJSON(t *testing.T) {
 		{name: "no coverage record clears nothing", thisRound: "", reviewed: nil, pending: []string{"review-1"}},
 		{name: "empty coverage list clears nothing", thisRound: "", reviewed: []string{}, pending: []string{"review-1"}},
 		{name: "coverage of another file clears nothing", thisRound: "", reviewed: []string{"cache.go"}, pending: []string{"review-1"}},
+		{name: "out-of-scope coverage clears nothing", thisRound: "", reviewed: []string{"unrelated.go"}, pending: []string{"review-1"}},
+		{name: "mixed in-scope and out-of-scope coverage clears nothing", thisRound: "", reviewed: []string{"service.go", "unrelated.go"}, pending: []string{"review-1"}},
 		{name: "reported defect stays outstanding", thisRound: reported, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
 		{name: "finding covered and no longer reported clears", thisRound: "", reviewed: []string{"service.go"}, pending: []string{"review-1"}, wantCleared: true},
 		{name: "an unwatched finding keeps its neighbour pending", thisRound: "", reviewed: []string{"cache.go"}, pending: []string{"review-1"}},
@@ -579,7 +586,7 @@ func TestResolveVerifiedFindingsJSON(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := resolveVerifiedFindingsJSON(reviewCarryTwoFindings, tc.pending, tc.reviewed, tc.thisRound)
+			got := resolveVerifiedFindingsJSON(reviewCarryTwoFindings, tc.pending, tc.reviewed, []string{"service.go", "cache.go"}, tc.thisRound)
 			parsed, err := types.ParseFindingsJSON(got)
 			if err != nil {
 				t.Fatalf("parse result: %v", err)
@@ -603,7 +610,7 @@ func TestResolveVerifiedFindingsJSON(t *testing.T) {
 // clears them.
 func TestResolveVerifiedFindingsJSON_FilelessFindingIsNeverVerifiedAway(t *testing.T) {
 	outstanding := `{"findings":[{"id":"review-1","severity":"warning","description":"finding with no file anchor","action":"ask-user"}],"summary":"1 finding"}`
-	got := resolveVerifiedFindingsJSON(outstanding, []string{"review-1"}, []string{"service.go", "cache.go"}, "")
+	got := resolveVerifiedFindingsJSON(outstanding, []string{"review-1"}, []string{"service.go", "cache.go"}, []string{"service.go", "cache.go"}, "")
 	if !strings.Contains(got, "review-1") {
 		t.Fatalf("file-less finding was verified away by an unrelated coverage record: %s", got)
 	}

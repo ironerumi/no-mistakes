@@ -427,7 +427,8 @@ func normalizeCoveredPath(value string) string {
 // resolveVerifiedFindingsJSON returns outstandingRaw minus every finding whose
 // ID is in pendingIDs and for which this round is a POSITIVE verification
 // record: the round listed the finding's file in its ReviewedPaths coverage,
-// and the round's own output (thisRoundRaw) neither re-reports the defect nor
+// that path is in the trusted reviewable set, and the round's own output
+// (thisRoundRaw) neither re-reports the defect nor
 // reports anything else at all in that same file.
 //
 // This is the only way a selected-and-fixed finding leaves the outstanding set
@@ -444,7 +445,7 @@ func normalizeCoveredPath(value string) string {
 // the predecessor dropped a selected finding the moment its fix was
 // requested, so a no-op fix could let the run complete with the defect
 // unresolved.
-func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, reviewedPaths []string, thisRoundRaw string) string {
+func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, reviewedPaths, reviewablePaths []string, thisRoundRaw string) string {
 	if outstandingRaw == "" || len(pendingIDs) == 0 || len(reviewedPaths) == 0 {
 		return outstandingRaw
 	}
@@ -461,11 +462,22 @@ func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, rev
 	if len(pending) == 0 {
 		return outstandingRaw
 	}
+	reviewable := make(map[string]bool, len(reviewablePaths))
+	for _, candidate := range reviewablePaths {
+		if normalized := normalizeCoveredPath(candidate); normalized != "" {
+			reviewable[normalized] = true
+		}
+	}
+	if len(reviewable) == 0 {
+		return outstandingRaw
+	}
 	covered := make(map[string]bool, len(reviewedPaths))
 	for _, reviewed := range reviewedPaths {
-		if normalized := normalizeCoveredPath(reviewed); normalized != "" {
-			covered[normalized] = true
+		normalized := normalizeCoveredPath(reviewed)
+		if normalized == "" || !reviewable[normalized] {
+			return outstandingRaw
 		}
+		covered[normalized] = true
 	}
 	if len(covered) == 0 {
 		return outstandingRaw
