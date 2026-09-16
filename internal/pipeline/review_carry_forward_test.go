@@ -149,6 +149,16 @@ func TestExecutor_ReviewCarryForward_RecoveryPersistsRemappedSelection(t *testin
 	if !containsString(selected, "review-2") || containsString(selected, "user-1") {
 		t.Fatalf("recovered selection IDs = %v, want remapped review-2 without stale user-1", selected)
 	}
+	if rounds[0].UserFindingsJSON == nil {
+		t.Fatal("expected remapped user findings to be persisted")
+	}
+	persistedUserFindings, err := types.ParseFindingsJSON(*rounds[0].UserFindingsJSON)
+	if err != nil {
+		t.Fatalf("parse persisted user findings: %v", err)
+	}
+	if !containsFindingID(persistedUserFindings.Items, "review-2") || containsFindingID(persistedUserFindings.Items, "user-1") {
+		t.Fatalf("persisted user finding IDs = %v, want remapped review-2 without user-1", findingIDs(persistedUserFindings.Items))
+	}
 	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -176,6 +186,23 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func containsFindingID(items []types.Finding, want string) bool {
+	for _, item := range items {
+		if item.ID == want {
+			return true
+		}
+	}
+	return false
+}
+
+func findingIDs(items []types.Finding) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	return ids
 }
 
 // TestExecutor_ReviewCarryForward_NoOpFixKeepsFindingParked mirrors the journey
@@ -734,6 +761,26 @@ func TestRetainFindingIDsByIdentity_UsesUserFindingIdentity(t *testing.T) {
 // TestRetainFindingIDsByIdentity_KeepsGenuineSameFindingAcrossRounds proves
 // the identity guard does not over-block: an ID that still names the SAME
 // finding across rounds must remain retained.
+func TestRetainFindingIDsByIdentity_KeepsRemappedUserFindingAfterRecovery(t *testing.T) {
+	persistedUserFindings := `{"findings":[{"id":"review-1","severity":"error","file":"service.go","description":"selected issue","action":"ask-user"},{"id":"review-2","severity":"info","file":"new.go","description":"new user note","action":"no-op","source":"user"}],"summary":"2 findings"}`
+	latestFindings := `{"findings":[{"id":"review-1","severity":"error","file":"service.go","description":"selected issue","action":"ask-user"},{"id":"review-2","severity":"info","file":"new.go","description":"new user note","action":"no-op","source":"user"},{"id":"review-3","severity":"warning","file":"other.go","description":"different finding","action":"auto-fix"}],"summary":"3 findings"}`
+	roundOne := &db.StepRound{
+		FindingsJSON:       strPtr(`{"findings":[{"id":"review-1","severity":"error","file":"service.go","description":"selected issue","action":"ask-user"}],"summary":"1 finding"}`),
+		UserFindingsJSON:   strPtr(persistedUserFindings),
+		SelectedFindingIDs: strPtr(`["review-1","review-2"]`),
+	}
+	roundTwo := &db.StepRound{
+		FindingsJSON:       strPtr(latestFindings),
+		SelectedFindingIDs: strPtr(`["review-3"]`),
+	}
+
+	identity := selectedFindingIdentities([]*db.StepRound{roundOne, roundTwo})
+	got := retainFindingIDsByIdentity(latestFindings, []string{"review-2"}, identity)
+	if len(got) != 1 || got[0] != "review-2" {
+		t.Fatalf("retainFindingIDsByIdentity() = %v, want remapped review-2 retained after recovery", got)
+	}
+}
+
 func TestRetainFindingIDsByIdentity_KeepsGenuineSameFindingAcrossRounds(t *testing.T) {
 	roundOneFindings := `{"findings":[{"id":"review-1","severity":"error","file":"service.go","description":"old carried issue","action":"ask-user"}],"summary":"1 finding"}`
 	roundOne := &db.StepRound{FindingsJSON: strPtr(roundOneFindings), SelectedFindingIDs: strPtr(`["review-1"]`)}

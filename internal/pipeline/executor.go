@@ -550,7 +550,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
 				var userFindingsJSON *string
 				if merged != "" && merged != selected {
-					userFindingsJSON = &merged
+					userFindingsJSON = &selectedForPersistence
 				}
 				if dbErr := e.db.SetStepRoundUserDecision(gate.lastRoundID, &idsJSON, db.RoundSelectionSourceUser, userFindingsJSON); dbErr != nil {
 					slog.Warn("failed to record recovered user decision", "step", gate.step.Name(), "round", gate.round, "error", dbErr)
@@ -1261,7 +1261,7 @@ rounds:
 					if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
 						var userFindingsJSON *string
 						if mergedFindings != "" && mergedFindings != selectedFindings {
-							userFindingsJSON = &mergedFindings
+							userFindingsJSON = &selectedForPersistence
 						}
 						if dbErr := e.db.SetStepRoundUserDecision(currentRoundID, &idsJSON, db.RoundSelectionSourceUser, userFindingsJSON); dbErr != nil {
 							slog.Warn("failed to record user decision", "step", stepName, "round", roundNum, "error", dbErr)
