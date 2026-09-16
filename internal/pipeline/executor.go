@@ -528,8 +528,13 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		telemetry.Track("fix", e.fixTelemetryFields("user", gate.step.Name(), selectedFindingCount(gate.findings, response.findingIDs), 0))
 		selected := filterFindingsJSON(gate.findings, response.findingIDs)
 		merged := mergeUserOverridesJSON(selected, response.instructions, response.addedFindings)
+		selectedForPersistence := merged
+		if gate.step.Name() == types.StepReview {
+			mergedOutstanding := mergeOutstandingFindingsJSON(gate.findings, merged, nil)
+			selectedForPersistence = remapFindingIDsJSON(mergedOutstanding, merged)
+		}
 		if gate.lastRoundID != "" {
-			allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, merged)
+			allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
 			if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
 				var userFindingsJSON *string
 				if merged != "" && merged != selected {
@@ -873,6 +878,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	selectedOutstandingIDs := state.selectedOutstandingIDs
 	if carryFindings {
 		outstandingFindings = state.outstandingFindings
+		pendingVerificationIDs = append([]string(nil), state.selectedOutstandingIDs...)
 	}
 
 	stepAgent := e.agent
@@ -1222,6 +1228,7 @@ rounds:
 				mergedFindings := mergeUserOverridesJSON(selectedFindings, response.instructions, response.addedFindings)
 				sctx.PreviousFindings = mergedFindings
 				sctx.DeferredFindings = removeMatchingFindingsJSON(effectiveFindings, selectedFindings)
+				selectedForPersistence := mergedFindings
 				if carryFindings {
 					// APPEND-ONLY: the selection is additionally handed to the fixer
 					// but is NOT subtracted from the outstanding set. It leaves only
@@ -1230,14 +1237,14 @@ rounds:
 					// P1 that let a no-op fix complete a run with the defect
 					// unresolved.
 					outstandingFindings = mergeOutstandingFindingsJSON(effectiveFindings, mergedFindings, nil)
-					remappedSelected := remapFindingIDsJSON(outstandingFindings, mergedFindings)
-					newPendingIDs := combineSelectedFindingIDs(response.findingIDs, remappedSelected)
+					selectedForPersistence = remapFindingIDsJSON(outstandingFindings, mergedFindings)
+					newPendingIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
 					pendingVerificationIDs = combineFindingIDLists(pendingVerificationIDs, newPendingIDs)
 					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, newPendingIDs)
 				}
 				nextTrigger = "auto_fix"
 				if currentRoundID != "" {
-					allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, mergedFindings)
+					allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
 					if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
 						var userFindingsJSON *string
 						if mergedFindings != "" && mergedFindings != selectedFindings {

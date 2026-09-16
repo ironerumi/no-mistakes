@@ -1,12 +1,14 @@
 package pipeline
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -20,6 +22,161 @@ const reviewCarryTwoFindings = `{"findings":[` +
 	`{"id":"review-1","severity":"error","file":"service.go","line":10,"description":"nil deref on the error path","action":"ask-user"},` +
 	`{"id":"review-2","severity":"warning","file":"cache.go","line":42,"description":"unbounded cache growth","action":"ask-user"}],` +
 	`"summary":"2 findings"}`
+
+func seedRecoveredReviewGate(t *testing.T, database *db.DB, run *db.Run, findings string, status types.StepStatus, selectedIDs string) (*db.StepResult, *db.Run) {
+	t.Helper()
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	stepResult, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(stepResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetStepFindings(stepResult.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	round, err := database.InsertReviewStepRound(stepResult.ID, 1, "initial", &findings, nil, "reviewed-head", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selectedIDs != "" {
+		if err := database.SetStepRoundUserDecision(round.ID, &selectedIDs, db.RoundSelectionSourceUser, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.UpdateStepStatusWithDuration(stepResult.ID, status, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	recoveredRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stepResult, recoveredRun
+}
+
+func TestExecutor_ReviewCarryForward_RecoverySeedsPendingVerification(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	findings := `{"findings":[{"id":"review-1","severity":"error","file":"service.go","description":"selected issue","action":"ask-user"}],"summary":"1 finding"}`
+	stepResult, recoveredRun := seedRecoveredReviewGate(t, database, run, findings, types.StepStatusFixReview, `["review-1"]`)
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		return &StepOutcome{ReviewedPaths: []string{"service.go"}}, nil
+	}}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- exec.Resume(ctx, recoveredRun, repo, t.TempDir()) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	var respondErr error
+	for time.Now().Before(deadline) {
+		if respondErr = exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); respondErr == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if respondErr != nil {
+		t.Fatalf("respond to recovered review: %v", respondErr)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("recovered review did not complete after positive verification")
+	}
+
+	got, err := database.GetStepResult(stepResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FindingsJSON != nil {
+		t.Fatalf("verified recovered finding remained outstanding: %s", *got.FindingsJSON)
+	}
+}
+
+func TestExecutor_ReviewCarryForward_RecoveryPersistsRemappedSelection(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	findings := `{"findings":[` +
+		`{"id":"user-1","severity":"warning","file":"old.go","description":"old carried issue","action":"ask-user"},` +
+		`{"id":"review-1","severity":"error","file":"service.go","description":"selected issue","action":"ask-user"}],"summary":"2 findings"}`
+	_, recoveredRun := seedRecoveredReviewGate(t, database, run, findings, types.StepStatusAwaitingApproval, "")
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		return &StepOutcome{NeedsApproval: true, ReviewedPaths: []string{"service.go", "new.go"}}, nil
+	}}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- exec.Resume(ctx, recoveredRun, repo, t.TempDir()) }()
+
+	added := []types.Finding{{ID: "user-1", Severity: types.FindingSeverityInfo, File: "new.go", Description: "new user note", Action: types.ActionNoOp}}
+	deadline := time.Now().Add(5 * time.Second)
+	var respondErr error
+	for time.Now().Before(deadline) {
+		if respondErr = exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, nil, added); respondErr == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if respondErr != nil {
+		t.Fatalf("respond to recovered review: %v", respondErr)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	var rounds []*db.StepRound
+	for time.Now().Before(deadline) {
+		steps, err := database.GetStepsByRun(run.ID)
+		if err == nil && len(steps) > 0 {
+			rounds, err = database.GetRoundsByStep(steps[0].ID)
+			if err == nil && len(rounds) >= 2 && steps[0].Status == types.StepStatusFixReview {
+				break
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if len(rounds) < 2 {
+		t.Fatal("recovered review did not reach its rereview gate")
+	}
+	selected := findingIDsFromSelectionJSON(derefString(rounds[0].SelectedFindingIDs))
+	if !containsString(selected, "review-2") || containsString(selected, "user-1") {
+		t.Fatalf("recovered selection IDs = %v, want remapped review-2 without stale user-1", selected)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovered review did not finish after approval")
+	}
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
 
 // TestExecutor_ReviewCarryForward_NoOpFixKeepsFindingParked mirrors the journey
 // that made the predecessor carry design (PR #704) a work-loss hole, inverted to
