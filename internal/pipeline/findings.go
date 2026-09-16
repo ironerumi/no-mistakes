@@ -272,6 +272,22 @@ func hasAskUserFindingsJSON(raw string) bool {
 	return types.HasAskUserFindings(findings)
 }
 
+func hasBlockingFindingsJSON(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return true
+	}
+	for _, item := range findings.Items {
+		if item.Severity == types.FindingSeverityError || item.Severity == types.FindingSeverityWarning {
+			return true
+		}
+	}
+	return false
+}
+
 func findingIDsFromSelectionJSON(raw string) []string {
 	if raw == "" {
 		return nil
