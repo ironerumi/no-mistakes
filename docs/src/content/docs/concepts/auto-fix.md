@@ -30,7 +30,7 @@ flowchart TD
    - If issues remain, the step pauses for user approval
    - If no step-specific outstanding condition remains, the step completes and the pipeline moves on
 
-Review has one additional condition: a finding selected for a fix remains outstanding until a later rereview positively covers its file and reports neither that finding nor another finding in the same file. Missing coverage or silence is not verification, so the Review gate can remain parked even when no blocking-severity finding is reported. See the [Review step reference](/no-mistakes/reference/pipeline-steps/#review) for the full carry-forward contract.
+Review has an additional step-specific outstanding condition; missing coverage or silence can keep its gate parked even when no blocking-severity finding is reported. See the [Review step reference](/no-mistakes/reference/pipeline-steps/#review) for the authoritative carry-forward contract.
 
 The document step applies fixes during its initial pass instead of relying on a follow-up automatic fix loop.
 When `commands.lint` is empty, that same invocation is a combined documentation-and-lint housekeeping pass: it updates documentation, detects relevant linters and formatters, applies safe fixes, verifies both duties, and categorizes any unresolved findings for the document or lint gate.
@@ -93,7 +93,7 @@ When the pipeline pauses for approval, you can manually trigger a fix from the T
 The agent receives the merged fix payload for that round: the selected agent findings, any per-finding user notes, any selected user-authored findings added from the TUI or AXI interface, and the shared [finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history).
 The current step's part of that history also includes one-line summaries from earlier fix commits.
 
-After a user-triggered fix, the step re-runs. It completes if the check passes and no step-specific outstanding condition remains, or pauses again with the new results in `fix_review` status. For Review, a selected finding still requires positive rereview coverage before it can clear; an operator can also explicitly approve, fix again, skip, or abort, subject to the [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths).
+After a user-triggered fix, the step re-runs. It completes if the check passes and no step-specific outstanding condition remains, or pauses again with the new results in `fix_review` status. For Review, see the [Review step reference](/no-mistakes/reference/pipeline-steps/#review) for its carry-forward condition; an operator can also explicitly approve, fix again, skip, or abort, subject to the [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths).
 
 ## Fix commits
 
