@@ -130,6 +130,59 @@ func TestExecutor_ReviewCarryForward_NoOpFixKeepsFindingParked(t *testing.T) {
 // once the rereview positively records that it covered the finding's file and
 // no longer reports the defect. Without this the carry set could only grow and
 // a verified fix would park forever.
+func TestExecutor_ReviewCarryForward_UserAddedFindingStaysOutstanding(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	calls := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			calls++
+			if calls == 1 {
+				return &StepOutcome{
+					NeedsApproval: true,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"service.go","description":"nil deref","action":"ask-user"}],"summary":"1 finding"}`,
+				}, nil
+			}
+			return &StepOutcome{}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	added := []types.Finding{{Severity: types.FindingSeverityWarning, File: "logger.go", Description: "audit logger setup", Action: types.ActionAskUser}}
+	if err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, nil, added); err != nil {
+		t.Fatalf("fix with added finding: %v", err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := types.ParseFindingsJSON(*steps[0].FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse outstanding findings: %v", err)
+	}
+	found := false
+	for _, item := range parsed.Items {
+		if item.ID == "user-1" && item.Description == "audit logger setup" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("user-added finding was dropped from outstanding carry: %s", *steps[0].FindingsJSON)
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	waitExecutorDone(t, done)
+}
+
 func TestExecutor_ReviewCarryForward_PositiveCoverageClearsFinding(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
