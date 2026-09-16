@@ -863,7 +863,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// for, so a finding the operator selected for a fix stays outstanding until
 	// a later round positively verifies it (outcome.ReviewedPaths) or the
 	// operator resolves it at a gate. pendingVerificationIDs names the
-	// selection the NEXT round is verifying. The loop itself is bounded only by
+	// selection that later rounds may verify. The loop itself is bounded only by
 	// auto_fix.review (the automatic-round budget) and the human/agent gate,
 	// same as upstream. Repeated user selections remain operator/driver-owned,
 	// rather than receiving a separate code-level round cap. Unused by every other step.
@@ -1008,8 +1008,8 @@ rounds:
 			// set only on a positive coverage record that also no longer reports
 			// the defect.
 			outstandingFindings = resolveVerifiedFindingsJSON(outstandingFindings, pendingVerificationIDs, outcome.ReviewedPaths, roundFindings)
+			pendingVerificationIDs = retainFindingIDs(outstandingFindings, pendingVerificationIDs)
 			selectedOutstandingIDs = retainFindingIDs(outstandingFindings, selectedOutstandingIDs)
-			pendingVerificationIDs = nil
 			effectiveFindings = mergeOutstandingFindingsJSON(outstandingFindings, roundFindings, outcome.ReviewedPaths)
 			outstandingFindings = effectiveFindings
 		}
@@ -1091,8 +1091,8 @@ rounds:
 				sctx.PreviousFindings = fixableFindings
 				sctx.DeferredFindings = removeMatchingFindingsJSON(effectiveFindings, fixableFindings)
 				if carryFindings {
-					pendingVerificationIDs = findingIDList(fixableFindings)
-					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, pendingVerificationIDs)
+					pendingVerificationIDs = combineFindingIDLists(pendingVerificationIDs, findingIDList(fixableFindings))
+					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, findingIDList(fixableFindings))
 				}
 				nextTrigger = "auto_fix"
 				continue rounds
@@ -1230,8 +1230,9 @@ rounds:
 					// P1 that let a no-op fix complete a run with the defect
 					// unresolved.
 					outstandingFindings = mergeOutstandingFindingsJSON(effectiveFindings, mergedFindings, nil)
-					pendingVerificationIDs = combineSelectedFindingIDs(response.findingIDs, mergedFindings)
-					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, pendingVerificationIDs)
+					newPendingIDs := combineSelectedFindingIDs(response.findingIDs, mergedFindings)
+					pendingVerificationIDs = combineFindingIDLists(pendingVerificationIDs, newPendingIDs)
+					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, newPendingIDs)
 				}
 				nextTrigger = "auto_fix"
 				if currentRoundID != "" {

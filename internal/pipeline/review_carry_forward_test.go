@@ -183,6 +183,81 @@ func TestExecutor_ReviewCarryForward_UserAddedFindingStaysOutstanding(t *testing
 	waitExecutorDone(t, done)
 }
 
+func TestExecutor_ReviewCarryForward_PendingSelectionsSurviveLaterRounds(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	round := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			round++
+			switch round {
+			case 1:
+				return &StepOutcome{
+					NeedsApproval: true,
+					Findings: `{"findings":[` +
+						`{"id":"review-1","severity":"error","file":"service.go","description":"nil deref","action":"ask-user"},` +
+						`{"id":"review-2","severity":"warning","file":"cache.go","description":"unbounded cache","action":"ask-user"}],"summary":"2 findings"}`,
+				}, nil
+			case 2:
+				return &StepOutcome{
+					NeedsApproval: true,
+					Findings:      `{"findings":[{"id":"review-2","severity":"warning","file":"cache.go","description":"unbounded cache","action":"ask-user"}],"summary":"1 finding"}`,
+					ReviewedPaths: []string{"cache.go"},
+				}, nil
+			default:
+				return &StepOutcome{
+					NeedsApproval: true,
+					Findings:      `{"findings":[{"id":"review-2","severity":"warning","file":"cache.go","description":"unbounded cache","action":"ask-user"}],"summary":"1 finding"}`,
+					ReviewedPaths: []string{"service.go"},
+				}, nil
+			}
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
+		t.Fatal(err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-2"}); err != nil {
+		t.Fatal(err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps[0].FindingsJSON == nil {
+		t.Fatal("finding B did not remain outstanding")
+	}
+	parsed, err := types.ParseFindingsJSON(*steps[0].FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse outstanding findings: %v", err)
+	}
+	var hasA, hasB bool
+	for _, item := range parsed.Items {
+		hasA = hasA || item.ID == "review-1"
+		hasB = hasB || item.ID == "review-2"
+	}
+	if hasA {
+		t.Fatalf("finding A remained outstanding after a later positive verification: %s", *steps[0].FindingsJSON)
+	}
+	if !hasB {
+		t.Fatalf("finding B was not preserved while A was verified: %s", *steps[0].FindingsJSON)
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	waitExecutorDone(t, done)
+}
+
 func TestExecutor_ReviewCarryForward_PositiveCoverageClearsFinding(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
