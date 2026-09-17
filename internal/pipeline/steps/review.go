@@ -380,13 +380,15 @@ Risk assessment (after listing all findings):
 	}
 
 	needsApproval := hasBlockingFindings(findings.Items)
-	if !needsApproval && findings.ReviewedPaths != nil && !reviewedPathsCoverReviewable(findings.ReviewedPaths, reviewable) {
-		// A legacy caller that omits reviewed_paths entirely keeps the
-		// pre-existing behavior above (findings.ReviewedPaths == nil is
-		// excluded from this branch). But once an agent DOES report
-		// reviewed_paths, it is held to covering every trusted reviewable
-		// path: an empty or partial list must not certify the whole head as
-		// reviewed just because it happened to report zero findings.
+	if !needsApproval && !reviewedPathsCoverReviewable(findings.ReviewedPaths, reviewable) {
+		// A clean round certifies the whole head, so it is held to a positive
+		// coverage record over every trusted reviewable path. An omitted
+		// reviewed_paths is not a legacy pass: the field is optional in the
+		// schema only so an older payload still parses, and an absent list is
+		// the same missing evidence as an empty or partial one (VISION.md R4:
+		// every review pass covers the complete change). The head parks for
+		// approval instead, and the log names what was left unverified.
+		sctx.Log(uncoveredReviewMessage(findings.ReviewedPaths, reviewable))
 		needsApproval = true
 	}
 	findingsJSON, _ := json.Marshal(findings)

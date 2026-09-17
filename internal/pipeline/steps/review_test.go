@@ -117,25 +117,36 @@ func TestReviewStep_UnrunAnalyzerDoesNotApprove(t *testing.T) {
 // TestReviewStep_PartialReviewedPathsDoesNotGrantApproval closes the
 // Greptile P1 that a clean round (zero findings) with an EMPTY or PARTIAL
 // reviewed_paths could still certify the whole head, since NeedsApproval
-// was decided from hasBlockingFindings alone. Legacy behavior (no
-// reviewed_paths field at all) is preserved so making the field optional
-// does not regress a caller that never adopted it.
+// was decided from hasBlockingFindings alone. An OMITTED reviewed_paths is
+// held to the same bar: the field is schema-optional only so an older
+// payload still parses, never a legacy pass that clears the head unread
+// (VISION.md R4). Each parked case logs which reviewable files went
+// unverified so the operator can see why a clean review did not approve.
 func TestReviewStep_PartialReviewedPathsDoesNotGrantApproval(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name              string
 		output            json.RawMessage
 		wantNeedsApproval bool
+		wantLog           string
 	}{
 		{
-			name:              "reviewed_paths absent behaves like legacy: clean findings approve",
+			name:              "reviewed_paths absent fails closed: clean findings park for approval",
 			output:            json.RawMessage(`{"findings":[],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`),
-			wantNeedsApproval: false,
+			wantNeedsApproval: true,
+			wantLog:           "review reported no reviewed_paths; parking for approval with 1 reviewable file(s) unverified: feature.txt",
+		},
+		{
+			name:              "reviewed_paths explicitly null fails closed like an omitted field",
+			output:            json.RawMessage(`{"findings":[],"reviewed_paths":null,"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`),
+			wantNeedsApproval: true,
+			wantLog:           "review reported no reviewed_paths; parking for approval with 1 reviewable file(s) unverified: feature.txt",
 		},
 		{
 			name:              "reviewed_paths present but empty does not grant approval",
 			output:            json.RawMessage(`{"findings":[],"reviewed_paths":[],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`),
 			wantNeedsApproval: true,
+			wantLog:           "review coverage is incomplete; parking for approval with 1 reviewable file(s) unverified: feature.txt",
 		},
 		{
 			name:              "reviewed_paths present and covering the reviewable set approves",
@@ -146,6 +157,7 @@ func TestReviewStep_PartialReviewedPathsDoesNotGrantApproval(t *testing.T) {
 			name:              "reviewed_paths with an out-of-scope path does not approve",
 			output:            json.RawMessage(`{"findings":[],"reviewed_paths":["feature.txt","fabricated.txt"],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`),
 			wantNeedsApproval: true,
+			wantLog:           "review coverage is incomplete; parking for approval; 1 reviewed_paths entry(ies) outside the reviewable set: fabricated.txt",
 		},
 	}
 	for _, tc := range cases {
@@ -159,6 +171,8 @@ func TestReviewStep_PartialReviewedPathsDoesNotGrantApproval(t *testing.T) {
 				},
 			}
 			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			var logs []string
+			sctx.Log = func(msg string) { logs = append(logs, msg) }
 
 			outcome, err := (&ReviewStep{}).Execute(sctx)
 			if err != nil {
@@ -166,6 +180,16 @@ func TestReviewStep_PartialReviewedPathsDoesNotGrantApproval(t *testing.T) {
 			}
 			if outcome.NeedsApproval != tc.wantNeedsApproval {
 				t.Fatalf("NeedsApproval = %v, want %v", outcome.NeedsApproval, tc.wantNeedsApproval)
+			}
+			joined := strings.Join(logs, "\n")
+			if tc.wantLog == "" {
+				if strings.Contains(joined, "parking for approval") {
+					t.Fatalf("full coverage must not log a coverage park; logs:\n%s", joined)
+				}
+				return
+			}
+			if !strings.Contains(joined, tc.wantLog) {
+				t.Fatalf("log missing %q; logs:\n%s", tc.wantLog, joined)
 			}
 		})
 	}
