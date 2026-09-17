@@ -167,6 +167,14 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	if approvalReason != "" && (step != types.StepTest || action != types.ActionApprove) {
 		return fmt.Errorf("an approval reason applies only to Test approval")
 	}
+	// The gate loop dispatches on the action, so an unknown one is refused
+	// here while the gate stays parked for a valid response, rather than
+	// being delivered to a switch it cannot match.
+	switch action {
+	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort:
+	default:
+		return fmt.Errorf("unrecognized approval action %q (valid: approve, fix, skip, abort)", action)
+	}
 	e.mu.Lock()
 	if !e.waiting {
 		e.mu.Unlock()
@@ -1271,6 +1279,18 @@ rounds:
 				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
 				slog.Info("step fix requested, re-executing", "step", stepName)
 				continue rounds
+
+			default:
+				// RespondWithOverrides already refuses an action outside the
+				// vocabulary, so this is only reachable by a producer that
+				// bypassed it. Failing the step is deliberate: silently
+				// re-parking would loop forever on a response nobody can act on.
+				err := fmt.Errorf("unrecognized approval action %q", response.action)
+				if dbErr := e.db.FailStep(sr.ID, err.Error(), executionMS); dbErr != nil {
+					slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
+				}
+				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", err.Error(), &executionMS)
+				return false, "", fmt.Errorf("step %s: %w", stepName, err)
 			}
 		}
 	}
