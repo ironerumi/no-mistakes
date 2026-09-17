@@ -57,6 +57,7 @@ func TestReviewStep_DropsDeferredPipelineOwnedPRFinding(t *testing.T) {
 				RiskLevel:     "high",
 				RiskRationale: "required PR criterion not satisfied",
 				RiskScope:     types.FindingsRiskScopePipelineOwnedDelivery,
+				ReviewedPaths: []string{"feature.txt"},
 			}
 			j, _ := json.Marshal(findings)
 			return &agent.Result{Output: j}, nil

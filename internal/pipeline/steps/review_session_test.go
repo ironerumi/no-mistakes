@@ -368,7 +368,7 @@ func TestReviewLoop_OtherStepsStaySessionIsolated(t *testing.T) {
 	mock.respond = func(opts agent.RunOpts) *agent.Result {
 		switch opts.Purpose {
 		case "review":
-			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)}
+			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external","reviewed_paths":["feature.txt"]}`)}
 		default:
 			return &agent.Result{Output: []byte(`{"findings":[],"summary":"nothing to do"}`)}
 		}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,6 +43,28 @@ func cleanReviewFindings() Findings {
 		RiskRationale: "clean",
 		RiskScope:     types.FindingsRiskScopeSourceOrExternal,
 	}
+}
+
+// fullReviewCoverage is the coverage record a mock reviewer that "read
+// everything" reports: every file changed between baseSHA and dir's working
+// tree, which is the same set ReviewStep computes as reviewable when no
+// ignore_patterns apply. Tests that exercise partial or fabricated coverage
+// spell reviewed_paths out instead.
+func fullReviewCoverage(t *testing.T, dir, baseSHA string) []string {
+	t.Helper()
+	cmd := exec.Command("git", "diff", "--name-only", "--no-renames", baseSHA)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git diff --name-only %s: %v", baseSHA, err)
+	}
+	paths := []string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths
 }
 
 // TestReviewStep_UnrunAnalyzerDoesNotApprove pins issue #703's review half: a
@@ -529,7 +552,7 @@ func TestReviewStep_FixMode(t *testing.T) {
 				return &agent.Result{Output: json.RawMessage(`{"summary":"  'address review findings.'  "}`)}, nil
 			}
 			// Review call — return clean findings
-			findings := Findings{Items: []Finding{}, Summary: "all clear", RiskLevel: "low", RiskRationale: "all clear", RiskScope: types.FindingsRiskScopeSourceOrExternal}
+			findings := Findings{Items: []Finding{}, Summary: "all clear", RiskLevel: "low", RiskRationale: "all clear", RiskScope: types.FindingsRiskScopeSourceOrExternal, ReviewedPaths: fullReviewCoverage(t, dir, baseSHA)}
 			j, _ := json.Marshal(findings)
 			return &agent.Result{Output: j}, nil
 		},
@@ -651,7 +674,9 @@ func TestReviewStep_SourceContentFindingFollowsNormalFixFlow(t *testing.T) {
 			case 3:
 				assertTestQualityRulePrompt(t, opts.Prompt)
 				assertTestQualityReviewerAction(t, opts.Prompt)
-				output, _ := json.Marshal(cleanReviewFindings())
+				rereview := cleanReviewFindings()
+				rereview.ReviewedPaths = fullReviewCoverage(t, dir, baseSHA)
+				output, _ := json.Marshal(rereview)
 				return &agent.Result{Output: output}, nil
 			default:
 				return nil, fmt.Errorf("unexpected agent call %d", calls)
