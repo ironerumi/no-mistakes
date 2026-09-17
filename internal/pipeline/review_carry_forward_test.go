@@ -606,6 +606,7 @@ func TestResolveVerifiedFindingsJSON(t *testing.T) {
 		{name: "out-of-scope coverage clears nothing", thisRound: "", reviewed: []string{"unrelated.go"}, pending: []string{"review-1"}},
 		{name: "mixed in-scope and out-of-scope coverage clears nothing", thisRound: "", reviewed: []string{"service.go", "unrelated.go"}, pending: []string{"review-1"}},
 		{name: "reported defect stays outstanding", thisRound: reported, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
+		{name: "unanchored current finding prevents clearing", thisRound: `{"findings":[{"id":"review-9","severity":"info","description":"unanchored observation","action":"no-op"}],"summary":"1 finding"}`, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
 		{name: "finding covered and no longer reported clears", thisRound: "", reviewed: []string{"service.go"}, pending: []string{"review-1"}, wantCleared: true},
 		{name: "an unwatched finding keeps its neighbour pending", thisRound: "", reviewed: []string{"cache.go"}, pending: []string{"review-1"}},
 		{name: "line-shifted reword in the same file is ambiguous, not resolution", thisRound: lineShiftedReword, reviewed: []string{"service.go"}, pending: []string{"review-1"}},

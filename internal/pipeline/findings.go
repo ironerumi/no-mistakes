@@ -570,10 +570,13 @@ func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, rev
 	thisRound, _ := types.ParseFindingsJSON(thisRoundRaw)
 	reported := make(map[types.Finding]bool, len(thisRound.Items))
 	reportedFiles := make(map[string]bool, len(thisRound.Items))
+	hasUnanchoredFinding := false
 	for _, item := range thisRound.Items {
 		reported[findingKey(item)] = true
 		if normalized := normalizeCoveredPath(item.File); normalized != "" {
 			reportedFiles[normalized] = true
+		} else {
+			hasUnanchoredFinding = true
 		}
 	}
 	outstandingCounts := countFindingFingerprints(outstanding.Items)
@@ -581,7 +584,7 @@ func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, rev
 	result := types.FindingsMetadata(outstanding)
 	for _, item := range outstanding.Items {
 		file := normalizeCoveredPath(item.File)
-		if pending[item.ID] && covered[file] && !hasFindingMatch(item, reported, outstandingCounts, thisRoundCounts) && !reportedFiles[file] {
+		if pending[item.ID] && !hasUnanchoredFinding && covered[file] && !hasFindingMatch(item, reported, outstandingCounts, thisRoundCounts) && !reportedFiles[file] {
 			continue
 		}
 		result.Items = append(result.Items, item)
