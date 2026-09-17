@@ -520,16 +520,17 @@ func normalizeCoveredPath(value string) string {
 // besides an explicit operator action (approve/skip/abort). A file the round
 // did not list, a missing coverage record, a finding with no file, a round
 // that re-reports the defect, or a round that reports ANY OTHER finding in the
-// same file all leave the item in place: silence, or a round that did not
-// look, is never resolution, and neither is an ambiguous report that might be
-// the same defect shifted to another line or reworded. Without this last
-// check, a fix that moves a defect within the same file and a rereview that
-// describes it differently would both fail the exact-match and content-match
-// checks, so the defect would silently clear as "not reported" even though it
-// is still present, just relocated or restated. That is the P1 this closes -
-// the predecessor dropped a selected finding the moment its fix was
-// requested, so a no-op fix could let the run complete with the defect
-// unresolved.
+// same file all leave the item in place. Any file-less finding in the current
+// round also blocks verification of every selected file-anchored item in that
+// round: silence, or a round that did not look, is never resolution, and
+// neither is an ambiguous report that might be the same defect shifted to
+// another line or reworded. Without this last check, a fix that moves a defect
+// within the same file and a rereview that describes it differently would both
+// fail the exact-match and content-match checks, so the defect would silently
+// clear as "not reported" even though it is still present, just relocated or
+// restated. That is the P1 this closes - the predecessor dropped a selected
+// finding the moment its fix was requested, so a no-op fix could let the run
+// complete with the defect unresolved.
 func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, reviewedPaths, reviewablePaths []string, thisRoundRaw string) string {
 	if outstandingRaw == "" || len(pendingIDs) == 0 || len(reviewedPaths) == 0 {
 		return outstandingRaw
