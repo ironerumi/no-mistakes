@@ -697,7 +697,7 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 	var gate *recoveredGate
 	for index, result := range results {
 		if result.StepName != e.steps[index].Name() {
-			return nil, fmt.Errorf("recovered step %d is %q, want %q", index, result.StepName, e.steps[index].Name())
+			return nil, fmt.Errorf("recovered run uses an incompatible pipeline step order at position %d: found %q, want %q; runs started by the previous version must be finished or aborted before upgrading no-mistakes", index, result.StepName, e.steps[index].Name())
 		}
 		if result.Status == types.StepStatusAwaitingApproval || result.Status == types.StepStatusFixReview {
 			if gate != nil || result.FindingsJSON == nil || result.StartedAt == nil || result.DurationMS == nil || result.AgentPID != nil {
@@ -763,7 +763,7 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 			return e.failRun(run, repo, context.Cause(ctx), ctx)
 		}
 		if index >= len(results) || results[index].StepName != e.steps[index].Name() || (!revalidating && results[index].Status != types.StepStatusPending && results[index].Status != types.StepStatusSkipped) {
-			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index), ctx)
+			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d; runs started by the previous version must be finished or aborted before upgrading no-mistakes", index), ctx)
 		}
 		if results[index].Status == types.StepStatusSkipped {
 			continue
