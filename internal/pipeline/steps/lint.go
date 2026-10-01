@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -82,11 +83,14 @@ func (s *LintStep) executeRepositoryLint(sctx *pipeline.StepContext) (*pipeline.
 		// pass assessed it fall through to a full agent pass, so the lint
 		// responsibility is never silently skipped.
 		if !sctx.Fixing {
-			if stash, ok := sctx.Shared.TakeHousekeepingLint(); ok {
-				if stash.HeadSHA == sctx.Run.HeadSHA {
-					return lintOutcomeFromHousekeeping(sctx, stash)
+			status, statusErr := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+			if statusErr == nil && status == "" {
+				if stash, ok := sctx.Shared.TakeHousekeepingLint(); ok {
+					if stash.HeadSHA == sctx.Run.HeadSHA {
+						return lintOutcomeFromHousekeeping(sctx, stash)
+					}
+					sctx.Log("combined housekeeping lint result predates later commits, running lint's own pass")
 				}
-				sctx.Log("combined housekeeping lint result predates later commits, running lint's own pass")
 			}
 		}
 		sctx.Log("no lint command configured, asking agent to lint and fix...")

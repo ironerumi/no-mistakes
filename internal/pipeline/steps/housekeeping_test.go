@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -320,6 +321,37 @@ func TestLintStep_HousekeepingStashIsIgnoredWhenTheHeadMoved(t *testing.T) {
 	}
 	if len(ag.calls) != 1 {
 		t.Fatalf("a stash from an earlier head must fall back to lint's own pass, got %d agent calls", len(ag.calls))
+	}
+}
+
+func TestLintStep_HousekeepingStashIsIgnoredWhenWorktreeDirty(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"lint clean"}`)}, nil
+		},
+	}
+	sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Shared.SetHousekeepingLint(pipeline.HousekeepingLintResult{
+		FindingsJSON: `{"findings":[],"summary":"stale"}`,
+		Summary:      "stale",
+		HeadSHA:      sctx.Run.HeadSHA,
+	})
+	if err := os.WriteFile(filepath.Join(dir, "pending-lint.txt"), []byte("pending\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (&LintStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("a dirty worktree must fall back to lint's own pass, got %d agent calls", len(ag.calls))
+	}
+	if status := gitStatusPorcelain(t, dir); status != "" {
+		t.Fatalf("lint's own pass left the dirty worktree uncommitted: %q", status)
 	}
 }
 
