@@ -13,7 +13,7 @@ import (
 )
 
 // cleanCatchAllAction is the "everything else is fine" tail every scenario in
-// this file ends with: the test, document, lint and push turns.
+// this file ends with: the document, review, test, lint and push turns.
 const cleanCatchAllAction = `  - text: "no issues found"
     structured:
       findings: []

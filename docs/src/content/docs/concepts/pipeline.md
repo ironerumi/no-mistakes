@@ -28,7 +28,7 @@ A repository can add to this sequence but never subtract from it: [`gates`](/no-
 The pipeline is opinionated so that "passed the gate" has a stable meaning:
 
 - the branch was checked against fresh remote upstream and the pushed-branch target first
-- review, tests, user-facing test evidence when available, docs, and lint happened before any branch push to the configured target
+- documentation, review, tests, user-facing test evidence when available, and lint happened before any branch push to the configured target
 - every repository-declared gate ran at its configured point before Push, unless the operator explicitly skipped it after a failure
 - the human stayed in control when a step needed judgment
 - the final branch update was guarded against discarding unincorporated commits already on the push target
@@ -54,7 +54,7 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 - **Rebase next** so everything else runs against the latest upstream and pushed-branch target.
   It also stops when the branch would silently bundle commits from a local default branch that were never pushed to `origin/<default_branch>`.
   If there's no diff left after the rebase, the pipeline skips the rest.
-- **Document before review** so documentation edits are committed before review reads the branch and review's certified head includes them. A documentation edit is reviewed like any other change, and its findings follow the normal Review fix flow, so the PR attestation never names a head whose document commit no reviewer saw. The cost is that docs are written before Review and Test, so a fix those steps commit afterwards reaches the docs only through Review's rereview.
+- **Document before review** so documentation edits are committed before review reads the branch and review's certified head includes them. A documentation edit is reviewed like any other change, and its findings follow the normal Review fix flow, so the PR attestation never names a head whose document commit no reviewer saw. The tradeoff is that documentation is written before Review and Test; later fixes follow their owning gates, and the Document step is not rerun.
 - **Review before test** so the agent reads fresh code, not code it may have touched during fixes.
   A later run's initial review also receives fix-round provenance for any uncertified pipeline-authored commits left on the branch when a previous run's re-review did not complete.
 - **Lint last among local checks** so it doesn't churn over code that may still change.
