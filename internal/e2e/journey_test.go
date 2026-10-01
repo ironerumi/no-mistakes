@@ -103,7 +103,7 @@ func TestAXIControlByteFailureGateRemainsReadable(t *testing.T) {
 	if !bytes.Contains(rawLog, []byte("bad\x1fvalue")) {
 		t.Fatal("durable Test log should preserve the raw control byte")
 	}
-	for _, stepName := range []types.StepName{types.StepDocument, types.StepLint, types.StepPush} {
+	for _, stepName := range []types.StepName{types.StepLint, types.StepPush} {
 		step, ok := findStep(run.Steps, stepName)
 		if !ok || step.Status != types.StepStatusPending {
 			t.Fatalf("%s should remain pending at the readable Test gate, got %+v", stepName, step)
@@ -428,6 +428,11 @@ func cleanReviewScenario(t *testing.T) string {
       artifacts: []
       title: "docs: update README"
       body: "## Summary\ndocumentation update"
+  - match: "report only what you could not resolve.\n\nContext:\n- branch: review-warning"
+    text: "documentation current"
+    structured:
+      findings: []
+      summary: "documentation current"
   - match: "branch: review-warning"
     text: "review found a warning"
     structured:
@@ -466,6 +471,7 @@ func cleanReviewScenario(t *testing.T) string {
       artifacts: []
       reviewed_paths:
         - "agent-edits.txt"
+        - "agent-edit.txt"
         - ".no-mistakes.yaml"
   - match: "You are validating a code change by driving the product itself. Derive the scenarios this change must satisfy, then run each one against the real running product.\n\nContext:\n- branch: test-agent-new-test-file"
     text: "tests passed after adding a regression test"
@@ -2704,7 +2710,7 @@ func assertPushedHead(t *testing.T, runHeadSHA, upstreamHeadSHA string) {
 
 func assertPipelineStepsInOrder(t *testing.T, steps []ipc.StepResultInfo) {
 	t.Helper()
-	expected := []types.StepName{types.StepIntent, types.StepRebase, types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR, types.StepCI}
+	expected := []types.StepName{types.StepIntent, types.StepRebase, types.StepDocument, types.StepReview, types.StepTest, types.StepLint, types.StepPush, types.StepPR, types.StepCI}
 	if len(steps) != len(expected) {
 		t.Fatalf("pipeline recorded %d steps, want %d", len(steps), len(expected))
 	}

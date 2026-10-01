@@ -35,6 +35,13 @@ import (
 func TestFailedInvocationUsageJourney(t *testing.T) {
 	scenario := filepath.Join(t.TempDir(), "failed-invocation-usage.yaml")
 	content := `actions:
+  # Document runs before Review, so a rule keyed on the branch alone would
+  # also hand its review answer to the document pass; claim that pass first.
+  - match: "Analyze what the change made stale"
+    text: "docs current"
+    structured:
+      findings: []
+      summary: "docs current"
   # The fixer turn is claimed first: its prompt also carries the branch line
   # the rereview rule below matches on.
   - match: "Previous review findings to address:"

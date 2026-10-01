@@ -32,12 +32,12 @@ func TestGateStepCannotStartRecursivePipeline(t *testing.T) {
 	}{
 		{name: "claude", agent: "claude", executable: "claude", expectedPhase: "document", completes: true},
 		{name: "codex", agent: "codex", executable: "codex", expectedPhase: "document", completes: true},
-		{name: "rovodev", agent: "rovodev", executable: "rovodev", expectedPhase: "review"},
-		{name: "opencode", agent: "opencode", executable: "opencode", expectedPhase: "review", completes: true},
-		{name: "pi", agent: "pi", executable: "pi", expectedPhase: "review"},
-		{name: "copilot", agent: "copilot", executable: "copilot", expectedPhase: "review"},
-		{name: "cursor", agent: "cursor", executable: "acpx", expectedPhase: "review"},
-		{name: "explicit-acp", agent: "acp:fixture", executable: "acpx", expectedPhase: "review"},
+		{name: "rovodev", agent: "rovodev", executable: "rovodev", expectedPhase: "document"},
+		{name: "opencode", agent: "opencode", executable: "opencode", expectedPhase: "document", completes: true},
+		{name: "pi", agent: "pi", executable: "pi", expectedPhase: "document"},
+		{name: "copilot", agent: "copilot", executable: "copilot", expectedPhase: "document"},
+		{name: "cursor", agent: "cursor", executable: "acpx", expectedPhase: "document"},
+		{name: "explicit-acp", agent: "acp:fixture", executable: "acpx", expectedPhase: "document"},
 	}
 	for _, adapter := range adapters {
 		t.Run(adapter.name, func(t *testing.T) {

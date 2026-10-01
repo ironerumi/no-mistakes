@@ -32,8 +32,8 @@ func TestWithCustomGates_InsertsAfterAnchorAndPreservesCore(t *testing.T) {
 		{Name: "arch-fitness", After: types.StepReview, Command: "make arch-fitness"},
 	}))
 	want := []string{
-		"intent", "rebase", "review", "gate.review.arch-fitness",
-		"test", "gate.test.mutation-budget", "document", "lint", "push", "pr", "ci",
+		"intent", "rebase", "document", "review", "gate.review.arch-fitness",
+		"test", "gate.test.mutation-budget", "lint", "push", "pr", "ci",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("sequence =\n %v\nwant\n %v", got, want)
@@ -241,12 +241,12 @@ func TestCustomGateStep_WithoutFixAuthorizationRunsNoFixTurn(t *testing.T) {
 func TestBuildPipelineAttestation_ListsAGateAfterItsAnchor(t *testing.T) {
 	t.Parallel()
 	steps := []*db.StepResult{
+		{StepName: types.StepDocument, Status: types.StepStatusCompleted},
 		{StepName: types.StepReview, Status: types.StepStatusCompleted},
 		{StepName: types.CustomGateStepName(types.StepReview, "arch-fitness"), Status: types.StepStatusCompleted},
 		{StepName: types.CustomGateStepName(types.StepReview, "budget"), Status: types.StepStatusCompleted},
 		{StepName: types.StepTest, Status: types.StepStatusCompleted},
 		{StepName: types.CustomGateStepName(types.StepTest, "mutation"), Status: types.StepStatusCompleted},
-		{StepName: types.StepDocument, Status: types.StepStatusCompleted},
 	}
 
 	raw := buildPipelineAttestation(steps, nil, testPipelineHeadSHA)
@@ -261,8 +261,8 @@ func TestBuildPipelineAttestation_ListsAGateAfterItsAnchor(t *testing.T) {
 		got = append(got, string(s.Step))
 	}
 	want := []string{
-		"review", "gate.review.arch-fitness", "gate.review.budget",
-		"test", "gate.test.mutation", "document",
+		"document", "review", "gate.review.arch-fitness", "gate.review.budget",
+		"test", "gate.test.mutation",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("attestation order =\n %v\nwant\n %v", got, want)

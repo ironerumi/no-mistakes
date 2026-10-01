@@ -108,11 +108,11 @@ func (s StepName) Order() int {
 		return 1
 	case StepRebase:
 		return 2
-	case StepReview:
-		return 3
-	case StepTest:
-		return 4
 	case StepDocument:
+		return 3
+	case StepReview:
+		return 4
+	case StepTest:
 		return 5
 	case StepLint:
 		return 6
@@ -129,12 +129,12 @@ func (s StepName) Order() int {
 
 // AllSteps returns all core pipeline steps in execution order.
 func AllSteps() []StepName {
-	return []StepName{StepIntent, StepRebase, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
+	return []StepName{StepIntent, StepRebase, StepDocument, StepReview, StepTest, StepLint, StepPush, StepPR, StepCI}
 }
 
 func (s StepName) IsCustomGateAnchor() bool {
 	switch s {
-	case StepRebase, StepReview, StepTest, StepDocument, StepLint:
+	case StepRebase, StepDocument, StepReview, StepTest, StepLint:
 		return true
 	default:
 		return false

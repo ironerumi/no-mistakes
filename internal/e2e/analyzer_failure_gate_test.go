@@ -58,6 +58,16 @@ func TestAnalyzerEvidenceFailuresFailPipelineJourney(t *testing.T) {
           reason: ""
       verdict: go
       artifacts: []
+  - match: "report only what you could not resolve.\n\nContext:\n- branch: analyzer-review-null-findings"
+    text: "docs current"
+    structured:
+      findings: []
+      summary: "docs current"
+  - match: "report only what you could not resolve.\n\nContext:\n- branch: analyzer-test-incomplete-evidence"
+    text: "docs current"
+    structured:
+      findings: []
+      summary: "docs current"
   - match: "branch: analyzer-review-null-findings"
     text: "review unavailable"
     structured_raw: '{"findings":null,"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}'

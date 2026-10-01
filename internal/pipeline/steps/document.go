@@ -178,6 +178,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 			sctx.Shared.SetHousekeepingLint(pipeline.HousekeepingLintResult{
 				FindingsJSON: lintJSON,
 				Summary:      findings.Summary,
+				HeadSHA:      sctx.Run.HeadSHA,
 			})
 			sctx.Log(fmt.Sprintf("housekeeping lint result recorded for the lint step: %d unresolved items", len(lintFindings.Items)))
 		}

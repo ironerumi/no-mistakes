@@ -387,7 +387,7 @@ Explicit lint command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /
 
 When set, the lint step runs this exact command and checks the exit code.
 When empty, the agent-driven lint duty is folded into the document step's combined housekeeping pass: one agent invocation covers both documentation and lint, and the lint step consumes that result, reporting lint-category findings with the same gate semantics (blocking findings park for a decision).
-Neither responsibility is skipped: when the document step has nothing to run against (or its structured output cannot be trusted), the lint step runs its own agent pass as before.
+Neither responsibility is skipped: when the document step has nothing to run against, its structured output cannot be trusted, or Review or Test committed after the pass assessed the head, the lint step runs its own agent pass as before.
 
 ### commands.format
 
@@ -517,7 +517,7 @@ A gate runs its command in the run worktree through the platform shell, `sh -c` 
 
 #### Placement
 
-`after` names the core step the gate runs immediately after. Valid anchors are `rebase`, `review`, `test`, `document`, and `lint`.
+`after` names the core step the gate runs immediately after. Valid anchors are `rebase`, `document`, `review`, `test`, and `lint`.
 
 The delivery tail (`push`, `pr`, `ci`) cannot be anchored: a gate that ran after push would be validating a branch the world can already see. `intent` cannot be anchored either, because it establishes the acceptance criteria the later gates check against.
 
@@ -716,7 +716,7 @@ Continuity is proven when the repaired head is the run's durably review-approved
 `revalidate_repairs` sets the intent, identically on every path:
 
 - **`false` (default)** asks to publish when it is safe to. A repair that builds on the reviewed head - the ordinary case, where the fix agent adds a commit - is committed and published immediately through the same guarded path the [Push step](/no-mistakes/reference/pipeline-steps/#push) uses (review-approved-head continuity, that step's own remote-safety decision, remote verification, and the durable push binding all still apply), and the CI monitor keeps watching the same run for the new head. One repair costs one agent round.
-- **`true`** asks for revalidation outright: every repair is kept local, the run's review approval is revoked, and validation restarts at Review so the repaired head re-passes Review, Test, Document, and Lint before Push republishes it.
+- **`true`** asks for revalidation outright: every repair is kept local, the run's review approval is revoked, and validation restarts at Review so the repaired head re-passes Review, Test, and Lint before Push republishes it. The Document step is not re-run, because it precedes Review.
 
 CI repair publication uses the same settlement order as Push. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the publication and retry behavior.
 
@@ -728,7 +728,7 @@ The tradeoff `true` buys is cost against an unreviewed repair:
 
 | | `false` (default) | `true` |
 |---|---|---|
-| Ordinary repair that builds on the reviewed head | published immediately, one agent round | revalidated: one agent round plus a full Review, Test, Document, Lint, Push, PR pass |
+| Ordinary repair that builds on the reviewed head | published immediately, one agent round | revalidated: one agent round plus a full Review, Test, Lint, Push, PR pass |
 | Merge-conflict repair | revalidated | revalidated |
 | Ordinary repair is reviewed before it reaches the PR | no | yes |
 | Steps that re-run when a repair revalidates | Review onward; Intent and Rebase do not | same |

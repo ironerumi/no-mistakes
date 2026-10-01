@@ -201,22 +201,28 @@ func TestCommitAgentFixes_AllowsForwardAgentCommit(t *testing.T) {
 }
 
 func TestPostReviewStepsRefuseHeadClobberAtEntry(t *testing.T) {
+	// Document runs before Review but still commits on the pipeline head, so it
+	// is guarded alongside every step after Review.
 	postReviewSteps := []pipeline.Step{
-		&TestStep{},
 		&DocumentStep{},
+		&TestStep{},
 		&LintStep{},
 		&PushStep{},
 		&PRStep{},
 		&CIStep{},
 	}
-	allSteps := types.AllSteps()
-	if len(postReviewSteps) != len(allSteps)-types.StepReview.Order() {
-		t.Fatalf("covered post-review steps = %d, want %d from fixed pipeline order", len(postReviewSteps), len(allSteps)-types.StepReview.Order())
+	var want []types.StepName
+	for _, name := range types.AllSteps() {
+		if name.Order() > types.StepReview.Order() || name == types.StepDocument {
+			want = append(want, name)
+		}
+	}
+	if len(postReviewSteps) != len(want) {
+		t.Fatalf("covered steps = %d, want %d from fixed pipeline order", len(postReviewSteps), len(want))
 	}
 	for i, step := range postReviewSteps {
-		want := allSteps[types.StepReview.Order()+i]
-		if step.Name() != want {
-			t.Fatalf("covered post-review step %d = %s, want %s from fixed pipeline order", i, step.Name(), want)
+		if step.Name() != want[i] {
+			t.Fatalf("covered step %d = %s, want %s from fixed pipeline order", i, step.Name(), want[i])
 		}
 	}
 

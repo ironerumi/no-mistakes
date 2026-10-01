@@ -76,13 +76,17 @@ func (s *LintStep) executeRepositoryLint(sctx *pipeline.StepContext) (*pipeline.
 
 	if lintCmd == "" {
 		// The combined document+lint housekeeping pass already performed the
-		// agent-driven lint duty for this round; consume its result instead
-		// of paying a second cold agent invocation. Fix rounds and any round
-		// without a stashed result fall through to a full agent pass, so the
-		// lint responsibility is never silently skipped.
+		// agent-driven lint duty; consume its result instead of paying a
+		// second cold agent invocation. Fix rounds, a round without a
+		// stashed result, and a head that Review or Test moved after the
+		// pass assessed it fall through to a full agent pass, so the lint
+		// responsibility is never silently skipped.
 		if !sctx.Fixing {
 			if stash, ok := sctx.Shared.TakeHousekeepingLint(); ok {
-				return lintOutcomeFromHousekeeping(sctx, stash)
+				if stash.HeadSHA == sctx.Run.HeadSHA {
+					return lintOutcomeFromHousekeeping(sctx, stash)
+				}
+				sctx.Log("combined housekeeping lint result predates later commits, running lint's own pass")
 			}
 		}
 		sctx.Log("no lint command configured, asking agent to lint and fix...")

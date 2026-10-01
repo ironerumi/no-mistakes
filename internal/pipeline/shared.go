@@ -12,6 +12,10 @@ type HousekeepingLintResult struct {
 	FindingsJSON string
 	// Summary is the housekeeping pass's one-line lint summary.
 	Summary string
+	// HeadSHA is the head the lint half was assessed against. The document
+	// step runs before Review and Test, which may commit after it, so the
+	// lint step consumes the result only while the head is still this one.
+	HeadSHA string
 }
 
 // RunShared carries in-memory run-scoped results one step hands to a later

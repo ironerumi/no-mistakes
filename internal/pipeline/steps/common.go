@@ -365,9 +365,9 @@ func AllSteps() []pipeline.Step {
 	return []pipeline.Step{
 		&IntentStep{},
 		&RebaseStep{},
+		&DocumentStep{},
 		&ReviewStep{},
 		&TestStep{},
-		&DocumentStep{},
 		&LintStep{},
 		&PushStep{},
 		&PRStep{},

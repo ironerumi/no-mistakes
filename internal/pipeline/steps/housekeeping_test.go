@@ -84,6 +84,9 @@ func TestDocumentStep_CombinedPassCoversBothDutiesAndSplitsFindings(t *testing.T
 	if !ok {
 		t.Fatal("combined pass must stash the lint result")
 	}
+	if stash.HeadSHA != sctx.Run.HeadSHA {
+		t.Fatalf("stash head = %s, want the head the pass assessed %s", stash.HeadSHA, sctx.Run.HeadSHA)
+	}
 	lintFindings, err := types.ParseFindingsJSON(stash.FindingsJSON)
 	if err != nil {
 		t.Fatalf("parse stashed lint findings: %v", err)
@@ -194,7 +197,7 @@ func TestLintStep_ConsumesCombinedResultWithoutAgentPass(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			sctx.Shared.SetHousekeepingLint(pipeline.HousekeepingLintResult{FindingsJSON: tc.findings, Summary: "housekeeping"})
+			sctx.Shared.SetHousekeepingLint(pipeline.HousekeepingLintResult{FindingsJSON: tc.findings, Summary: "housekeeping", HeadSHA: sctx.Run.HeadSHA})
 			outcome, err := (&LintStep{}).Execute(sctx)
 			if err != nil {
 				t.Fatal(err)
@@ -216,7 +219,7 @@ func TestLintStep_MalformedCombinedResultFailsClosed(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newHousekeepingContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Shared.SetHousekeepingLint(pipeline.HousekeepingLintResult{FindingsJSON: `{not json`})
+	sctx.Shared.SetHousekeepingLint(pipeline.HousekeepingLintResult{FindingsJSON: `{not json`, HeadSHA: sctx.Run.HeadSHA})
 
 	outcome, err := (&LintStep{}).Execute(sctx)
 	if err == nil || !strings.Contains(err.Error(), "validate combined housekeeping lint result") {
@@ -289,6 +292,34 @@ func TestDocumentStep_CombinedRetryDropsPriorLintResultWhenOutputIsUntrusted(t *
 	}
 	if _, ok := sctx.Shared.TakeHousekeepingLint(); ok {
 		t.Fatal("untrusted combined rerun must not leave the prior lint result available")
+	}
+}
+
+// TestLintStep_HousekeepingStashIsIgnoredWhenTheHeadMoved proves the lint duty
+// survives the document step running before Review and Test: a stash assessed
+// against an earlier head is never trusted once either committed after it.
+func TestLintStep_HousekeepingStashIsIgnoredWhenTheHeadMoved(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"lint clean"}`)}, nil
+		},
+	}
+	sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Shared.SetHousekeepingLint(pipeline.HousekeepingLintResult{
+		FindingsJSON: `{"findings":[],"summary":"stale"}`,
+		Summary:      "stale",
+		HeadSHA:      baseSHA,
+	})
+
+	if _, err := (&LintStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("a stash from an earlier head must fall back to lint's own pass, got %d agent calls", len(ag.calls))
 	}
 }
 

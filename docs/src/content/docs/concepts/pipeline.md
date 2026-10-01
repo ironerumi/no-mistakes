@@ -6,7 +6,7 @@ description: The nine steps that run on every gated push.
 The pipeline has a fixed, opinionated sequence of nine core steps. Their order is not configurable. What each core step runs is.
 
 ```
-intent → rebase → review → test → document → lint → push → pr → ci
+intent → rebase → document → review → test → lint → push → pr → ci
 ```
 
 ```mermaid
@@ -40,9 +40,9 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 |---|---|---|---|
 | 1 | **Intent** | Use supplied intent or infer it from recent local agent transcripts | n/a |
 | 2 | **Rebase** | Fetch fresh remote upstream and the configured branch target, then rebase your branch onto them | `3` |
-| 3 | **Review** | AI code review of your diff | `0` (requires approval) |
-| 4 | **Test** | Targeted local validation of the change and intent (not a full CI suite), plus evidence when intent is available | `3` |
-| 5 | **Document** | Update docs when needed and report unresolved gaps | initial pass |
+| 3 | **Document** | Update docs when needed and report unresolved gaps | initial pass |
+| 4 | **Review** | AI code review of your diff, including the document step's edits | `0` (requires approval) |
+| 5 | **Test** | Targeted local validation of the change and intent (not a full CI suite), plus evidence when intent is available | `3` |
 | 6 | **Lint** | Run lint/static analysis; shares the document step's initial housekeeping pass when no lint command is configured | `3` |
 | 7 | **Push** | Safely push the validated branch to the configured target | n/a |
 | 8 | **PR** | Create or update the pull request | n/a |
@@ -54,9 +54,9 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 - **Rebase next** so everything else runs against the latest upstream and pushed-branch target.
   It also stops when the branch would silently bundle commits from a local default branch that were never pushed to `origin/<default_branch>`.
   If there's no diff left after the rebase, the pipeline skips the rest.
+- **Document before review** so documentation edits are committed before review reads the branch and review's certified head includes them. A documentation edit is reviewed like any other change, and its findings follow the normal Review fix flow, so the PR attestation never names a head whose document commit no reviewer saw. The cost is that docs are written before Review and Test, so a fix those steps commit afterwards reaches the docs only through Review's rereview.
 - **Review before test** so the agent reads fresh code, not code it may have touched during fixes.
   A later run's initial review also receives fix-round provenance for any uncertified pipeline-authored commits left on the branch when a previous run's re-review did not complete.
-- **Document after test** so docs are updated against code that's known to work.
 - **Lint last among local checks** so it doesn't churn over code that may still change.
 - **Push → PR → CI** happens after all local checks pass.
   CI publishes a repair through the Push step's guarded path and keeps monitoring only when it can prove the repair descends from the reviewed head; otherwise the repair revalidates from Review before Push republishes it, which is what a merge-conflict repair always does. [`ci.revalidate_repairs`](/no-mistakes/reference/repo-config/#cirevalidate_repairs) sets that intent: `false` (default) publishes when it is provable, `true` revalidates every repair.

@@ -6,7 +6,7 @@ description: Reference for each step in the validation pipeline.
 This is the per-step reference. For the overview and rationale, see [Pipeline](/no-mistakes/concepts/pipeline/). For the fix loop, see [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/).
 
 ```text
-intent → rebase → review → test → document → lint → push → pr → ci
+intent → rebase → document → review → test → lint → push → pr → ci
 ```
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Every step that scopes its work to the branch's changes (Review, Test, Document, Lint, PR drafting, CI repair, and repository gate fixes) first fetches the base branch's live remote tip and computes the branch base against it; if that fetch fails, the step fails instead of falling back to a possibly stale cached base ref. Review, Test, Document, Lint, and repository gate fixes use the same effective PR base as Rebase and PR drafting: the run's recorded `--base-branch` override wins over [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch), with the repository's forge default branch as the fallback. Their scope is the full branch delta from the merge-base with that target, not the last pushed delta or integration-only changes relative to the default branch. Review and Document prompts name that effective base branch. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
@@ -90,7 +90,7 @@ AI code review of your diff. This is probabilistic evidence, not a security or c
 
 **Behavior:**
 
-- Diffs the base commit against head
+- Diffs the base commit against head, which already includes the [Document](#document) step's commit, so documentation edits are reviewed like code
 - Filters out files matching `ignore_patterns` from the repo config
 - Sends the filtered diff to the agent with structured review instructions and a structured output schema
 - Requires the `reviewed_paths` coverage record before a clean review can certify the head: the exact changed files the reviewer actually read and judged. On a clean review it must exactly cover the trusted reviewable set computed from the current diff (the paths that survive `ignore_patterns`); omitted, empty, partial, fabricated, out-of-scope, or mixed coverage parks the round for approval instead of certifying the whole head, and the step log names the files left unverified. The field is optional in the output schema only so an older payload still parses; an absent record is treated as no coverage, never as a pass. During carry-forward verification, omitted or invalid coverage likewise cannot clear an outstanding selected finding.
@@ -129,7 +129,7 @@ AI code review of your diff. This is probabilistic evidence, not a security or c
 - Records every answered question per branch, so a later cold reviewer - including one in the run an author's own fix push started - receives them as a settled-questions section it must not re-raise, rendered separately from the acceptance criteria
 - Receives the most recent other run's review rounds on the same branch as a superseded-rounds section, so a run that replaced a parked one still sees what was found and answered; it carries no pipeline-authored provenance framing and does not characterise who wrote those commits, because that framing is only ever added when this run is itself a fix round or carries an uncertified range, and the selector is unfiltered by run status - a previous run that took a fix round and completed leaves the fixer's commits inside this run's scope
 - Enforces no limit on review fix rounds, by design
-- When a review-step fixer round commits and its re-review does not complete, persists that branch's uncertified commit range (lint and document fixer commits do not); the next run's initial review of that range receives the same pipeline-authored provenance framing so the replacement reviewer is not cold. A later rebase remaps the persisted SHAs onto the rewritten head. The range is cleared only after a completed review whose approved head equals or descends from the range tip; parked, failed, skipped, and aborted reviews leave it in place
+- When a review-step fixer round commits and its re-review does not complete, persists that branch's uncertified commit range (lint fixer commits do not; the document step runs before Review, so its commits are inside the reviewed range rather than a persisted one); the next run's initial review of that range receives the same pipeline-authored provenance framing so the replacement reviewer is not cold. A later rebase remaps the persisted SHAs onto the rewritten head. The range is cleared only after a completed review whose approved head equals or descends from the range tip; parked, failed, skipped, and aborted reviews leave it in place
 - With the default `session_reuse: true`, Claude, Codex, Grok, Pi, and Antigravity reuse one durable fixer session across review-fix turns when every configured fixer for the run supports resume. A later-round fixer that cannot resume makes all fixer turns cold; a resume failure retries the same fix turn in a fresh fixer session, and unsupported agents run cold. The [global configuration reference](/no-mistakes/reference/global-config/#later-round-role-overrides) owns the role-selection rules.
 - Bounds each agent turn independently with [`review_agent_timeout`](/no-mistakes/reference/global-config/#review_agent_timeout): the optional fixer, its fresh session-free rereviewer, and a finalize turn resumed after a park each receive the full wall-clock limit, as do every later fixer and rereviewer; reaching the hard limit cancels that agent and fails the step with measured last-activity or no-output evidence rather than leaving the run active indefinitely
 - Atomically records the exact commit examined when a full review completes successfully; a parked review retains its candidate only for recovery, while failed, skipped, superseded, and legacy reviews grant no inferred approval authority
@@ -184,7 +184,7 @@ Local Test is never a repository-wide regression-suite substitute; broad regress
 
 ## Document
 
-Updates matching documentation for code changes and reports only unresolved gaps.
+Updates matching documentation for code changes and reports only unresolved gaps. It runs before Review, so the commit it creates is part of the head Review certifies and the PR attestation names: Review reads documentation edits like any other change in the diff (runbooks, agent rules, and ADRs included), and its findings on them take the normal Review fix flow. There is no path allowlist and no propose-only mode.
 
 **Behavior:**
 
@@ -192,7 +192,7 @@ Updates matching documentation for code changes and reports only unresolved gaps
 - Asks the agent to find every documentation gap, update docs or doc comments for all gaps it can resolve, verify its edits, and commit any documentation changes under the placement policy
 - The placement policy gives each fact one authoritative owner, prefers removing stale duplicates or replacing them with pointers, avoids new documentation surfaces for perceived gaps, and keeps durable incident lessons near their owner instead of in `AGENTS.md`
 - `document.instructions` can add trusted default-branch ownership rules for the repository
-- When `commands.lint` is empty, performs documentation and agent-driven lint in one combined housekeeping invocation, categorizing findings for the document or lint gate; if that pass is skipped, its structured output is unusable, or a daemon restart loses the in-memory result, lint runs its own agent pass instead
+- When `commands.lint` is empty, performs documentation and agent-driven lint in one combined housekeeping invocation, categorizing findings for the document or lint gate; if that pass is skipped, its structured output is unusable, a daemon restart loses the in-memory result, or Review or Test committed after the pass assessed the head, lint runs its own agent pass instead
 - Includes user intent when available
 - Returns findings only for unresolved documentation gaps or human judgment calls
 - Requires approval whenever any unresolved documentation finding is returned, including `info` findings
@@ -209,7 +209,7 @@ Runs linters and static analysis.
 **Behavior:**
 
 - If `commands.lint` is set: ensures [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) has succeeded once for the isolated worktree, then runs lint via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows). Non-zero exit produces `warning` findings.
-- If `commands.lint` is empty: consumes lint-category findings from the document step's combined housekeeping pass, avoiding a second cold agent invocation. If no usable combined result exists, the lint step detects appropriate linters/formatters, applies safe fixes, reruns the relevant checks, commits any agent changes, and returns structured findings only for unresolved issues.
+- If `commands.lint` is empty: consumes lint-category findings from the document step's combined housekeeping pass, avoiding a second cold agent invocation, when the head is still the one that pass assessed. If no usable combined result exists or Review or Test has since committed, the lint step detects appropriate linters/formatters, applies safe fixes, reruns the relevant checks, commits any agent changes, and returns structured findings only for unresolved issues.
 - Machine-local [`repository_overrides.commands.lint.additional`](/no-mistakes/reference/global-config/#machine-local-commands) checks run after either lint path above; a failing one adds an auto-fixable `error` finding naming that local check and parks the step.
 - Bounds those agent turns, including a configured-lint repair turn, with [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout): an expired budget cancels the agent and fails the step with a timeout diagnostic rather than leaving the run active indefinitely
 
@@ -250,7 +250,7 @@ A remote branch can move without being rejected when all remote commits are alre
 Any other out-of-band commit stops the push instead of being overwritten.
 Pre-skipping or later skipping Review leaves no approval binding, so Push fails closed unless Push is also skipped.
 
-This step never requires approval - it runs automatically after review, test, document, and lint pass.
+This step never requires approval - it runs automatically after document, review, test, and lint pass.
 
 ## PR
 

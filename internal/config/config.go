@@ -86,8 +86,8 @@ const (
 	// DefaultCIRevalidateRepairs is the policy the CI step uses when
 	// ci.revalidate_repairs is unset. It is false because restarting the whole
 	// pipeline at Review for every CI repair is the single most expensive
-	// thing the pipeline can do to a run: it replays Review, Test, Document,
-	// Lint, Push, and PR against the repaired head, so one repair costs
+	// thing the pipeline can do to a run: it replays Review, Test, Lint,
+	// Push, and PR against the repaired head, so one repair costs
 	// another full agent pass over the whole change. VISION.md's cost
 	// constraint makes that opt-in.
 	//
@@ -634,7 +634,7 @@ type CI struct {
 	//
 	// true: the repair is kept local, the run's review approval is revoked,
 	// and the pipeline restarts at Review so the repaired head re-passes
-	// Review, Test, Document, and Lint before Push republishes it. Safer, and
+	// Review, Test, and Lint before Push republishes it. Safer, and
 	// materially more expensive in wall-clock time and tokens - which is why
 	// it is opt-in (see VISION.md).
 	RevalidateRepairs bool

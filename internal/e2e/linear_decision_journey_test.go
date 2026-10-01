@@ -13,10 +13,12 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// Drive a selected review fix followed by a documentation edit and a lint
-// fix turn through the real CLI, hook, daemon, worktree, and push. The canned
-// agent supplies only responses and edits, not pipeline decisions.
-func TestSelectedFixFollowedByDocumentEditDoesNotRestartReview(t *testing.T) {
+// Drive a selected review fix followed by a Test and a lint fix turn through
+// the real CLI, hook, daemon, worktree, and push; the Document step runs
+// before Review and so cannot see a decision made at the Review gate in the
+// same run. The canned agent supplies only responses and edits, not pipeline
+// decisions.
+func TestSelectedFixFollowedByLaterStepsDoesNotRestartReview(t *testing.T) {
 	scenario := filepath.Join(t.TempDir(), "linear.yaml")
 	content := `actions:
   - match: "Fix-round provenance:"
@@ -114,7 +116,7 @@ func TestSelectedFixFollowedByDocumentEditDoesNotRestartReview(t *testing.T) {
 	}
 	invocations := h.AgentInvocations()
 	var reviewCount int
-	var testDecision, documentDecision, lintDecision bool
+	var testDecision, lintDecision bool
 	for _, inv := range invocations {
 		if strings.Contains(inv.Prompt, "Review the code changes and return structured findings") {
 			reviewCount++
@@ -125,9 +127,6 @@ func TestSelectedFixFollowedByDocumentEditDoesNotRestartReview(t *testing.T) {
 		if strings.Contains(inv.Prompt, "You are validating a code change by driving the product itself") {
 			testDecision = hasJourneyDecisionContext(inv.Prompt)
 		}
-		if strings.Contains(inv.Prompt, "Find what this change made stale") {
-			documentDecision = hasJourneyDecisionContext(inv.Prompt)
-		}
 		if strings.Contains(inv.Prompt, "Fix the lint issues in this repository") {
 			lintDecision = hasJourneyDecisionContext(inv.Prompt)
 		}
@@ -135,8 +134,8 @@ func TestSelectedFixFollowedByDocumentEditDoesNotRestartReview(t *testing.T) {
 	if reviewCount != 2 {
 		t.Errorf("review turns = %d, want initial and fix rereview only", reviewCount)
 	}
-	if !testDecision || !documentDecision || !lintDecision {
-		t.Errorf("decision plus respect guidance reached subsequent steps: test=%v document=%v lint=%v", testDecision, documentDecision, lintDecision)
+	if !testDecision || !lintDecision {
+		t.Errorf("decision plus respect guidance reached subsequent steps: test=%v lint=%v", testDecision, lintDecision)
 	}
 	if got := h.UpstreamBranchSHA(branch); got != run.HeadSHA {
 		t.Errorf("published head %s, want %s", got, run.HeadSHA)
@@ -149,7 +148,7 @@ func TestSelectedFixFollowedByDocumentEditDoesNotRestartReview(t *testing.T) {
 	}
 	doc, err := h.runGit(context.Background(), h.UpstreamDir, "show", "refs/heads/"+branch+":README.md")
 	if err != nil || string(doc) != "# Corrected feature documentation\n" {
-		t.Errorf("published post-review documentation = %q, error %v", doc, err)
+		t.Errorf("published pre-review documentation = %q, error %v", doc, err)
 	}
 	feature, err := h.runGit(context.Background(), h.UpstreamDir, "show", "refs/heads/"+branch+":feature.txt")
 	if err != nil || string(feature) != "corrected feature\n" {
@@ -159,7 +158,7 @@ func TestSelectedFixFollowedByDocumentEditDoesNotRestartReview(t *testing.T) {
 	if err != nil || string(lintSentinel) != "lint clean\n" {
 		t.Errorf("published lint fix = %q, error %v", lintSentinel, err)
 	}
-	t.Logf("completed run %s; review turns %d; selected fix %q; post-review documentation %q; decision in Test %v, Document %v, Lint %v; published head %s", run.ID, reviewCount, feature, doc, testDecision, documentDecision, lintDecision, run.HeadSHA)
+	t.Logf("completed run %s; review turns %d; selected fix %q; pre-review documentation %q; decision in Test %v, Lint %v; published head %s", run.ID, reviewCount, feature, doc, testDecision, lintDecision, run.HeadSHA)
 }
 
 func hasJourneyDecisionContext(prompt string) bool {

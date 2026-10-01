@@ -99,7 +99,7 @@ func TestStatsDashboardCapsTopReposAndUsesPipelineStepOrder(t *testing.T) {
 	}
 	out := renderStatsDashboard(stats)
 
-	assertOrder(t, out, "review", "test", "document", "lint")
+	assertOrder(t, out, "document", "review", "test", "lint")
 	for _, want := range []string{"one", "two", "three"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stats output missing top repo %q:\n%s", want, out)
