@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -24,10 +25,12 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/logstore"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 	"github.com/kunchenguid/no-mistakes/internal/worktrees"
 )
 
@@ -38,7 +41,12 @@ import (
 // age floor because it owns that run.
 var orphanProcessMinAge = procreap.DefaultMinAge
 
-var applyShellEnvToProcess = shellenv.ApplyToProcess
+// applyShellEnvToProcess is the startup probe: it may wait for a login shell
+// binary that a boot-time race has not yet produced (see
+// shellenv.DefaultShellRetryWindow).
+var applyShellEnvToProcess = func(excluded ...string) error {
+	return shellenv.ApplyToProcessWithShellRetryExcept(shellenv.DefaultShellRetryWindow, excluded...)
+}
 var createDaemonPIDTempFile = os.CreateTemp
 var renameDaemonPIDFile = os.Rename
 
@@ -118,16 +126,21 @@ func prepareDaemonEnvironment() error {
 			return fmt.Errorf("unset %s: %w", key, err)
 		}
 	}
-	if err := applyShellEnvToProcess(); err != nil {
+	if err := applyLoginShellEnvironment(applyShellEnvToProcess, nmHome); err != nil {
 		return fmt.Errorf("apply login shell environment: %w", err)
-	}
-	if nmHome != "" {
-		if err := os.Setenv("NM_HOME", nmHome); err != nil {
-			return fmt.Errorf("restore NM_HOME: %w", err)
-		}
 	}
 	logDaemonPathSummary()
 	return nil
+}
+
+// applyLoginShellEnvironment applies a login-shell probe to the process and
+// keeps the service-supplied NM_HOME authoritative over anything the shell's
+// rc files export.
+func applyLoginShellEnvironment(apply func(...string) error, nmHome string) error {
+	if nmHome != "" {
+		return apply("NM_HOME")
+	}
+	return apply()
 }
 
 // logDaemonPathSummary records the effective PATH at daemon startup so that
@@ -176,7 +189,8 @@ func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
 	// bound, and held for the rest of the process lifetime - otherwise a
 	// second daemon racing to start against the same root can mark another
 	// live daemon's active runs as crashed and delete worktrees out from
-	// under it (see AGENTS.md "Daemon Singleton Lock").
+	// under it (see "Daemon Singleton Lock" in
+	// .agents/skills/daemon-runtime/SKILL.md).
 	lock, err := acquireSingletonLock(p)
 	if err != nil {
 		return err
@@ -838,7 +852,7 @@ func defaultTreeOrphanWorktrees(d *db.DB, p *paths.Paths) (removable []orphanWor
 // names only the exact directories run records name, which is the same rule
 // eject applies (see gate.removeRepoWorktrees): nothing there is enumerated,
 // and a directory no run recorded is never even looked at. Whether a named
-// directory may go is still the active-run guard (see skipWorktreeCleanup).
+// directory may go is decided by removableOrphanWorktree.
 func recordedOrphanWorktrees(d *db.DB, p *paths.Paths, leftover []db.RunWorktree) []orphanWorktree {
 	var removable []orphanWorktree
 	for _, wt := range leftover {
@@ -853,11 +867,20 @@ func recordedOrphanWorktrees(d *db.DB, p *paths.Paths, leftover []db.RunWorktree
 	return removable
 }
 
-// removableOrphanWorktree reports whether cleanup may take this directory,
-// which is the active-run guard (see skipWorktreeCleanup). A directory it
-// spares is neither swept nor removed.
+// removableOrphanWorktree combines the active-run guard with refusal retention.
+// This removal decision does not exempt retained terminal runs from the
+// independent startup process sweep or evidence expiry.
 func removableOrphanWorktree(d *db.DB, wt orphanWorktree) bool {
 	if skip, reason := skipWorktreeCleanup(context.Background(), d, wt.runID, wt.dir); skip {
+		slog.Info("skipping worktree cleanup", "path", wt.dir, "reason", reason)
+		return false
+	}
+	run, err := d.GetRun(wt.runID)
+	if err != nil {
+		slog.Warn("preserving run worktree: cannot read run", "run_id", wt.runID, "error", err)
+		return false
+	}
+	if reason := protectedPathCleanupReason(d, run); reason != "" {
 		slog.Info("skipping worktree cleanup", "path", wt.dir, "reason", reason)
 		return false
 	}
@@ -917,6 +940,31 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 		}
 	}
 	return false, ""
+}
+
+// protectedPathCleanupReason protects only the index and working files. It must
+// not be used as a process-liveness or test-evidence retention predicate.
+func protectedPathCleanupReason(d *db.DB, run *db.Run) string {
+	if run == nil || (run.Status == types.RunCancelled && run.Error != nil && *run.Error == types.RunCancelReasonAbortedByUser) {
+		return ""
+	}
+	results, err := d.GetStepsByRun(run.ID)
+	if err != nil {
+		return fmt.Sprintf("cannot read protected-path refusals for run %s: %v", run.ID, err)
+	}
+	for _, step := range results {
+		if step.FindingsJSON == nil || !pipeline.HasProtectedPathRefusal(*step.FindingsJSON) || step.Status == types.StepStatusCompleted {
+			continue
+		}
+		if step.Status == types.StepStatusSkipped && (step.Error == nil || *step.Error != types.RunCIMonitorInterruptedReason) {
+			continue
+		}
+		if step.Error != nil && *step.Error == "aborted by user" {
+			continue
+		}
+		return fmt.Sprintf("run %s has an unresolved protected-path refusal; preserving index and worktree", run.ID)
+	}
+	return ""
 }
 
 type gateMigrationStats struct {
@@ -1179,11 +1227,129 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if strings.TrimSpace(p.Gate) == "" {
 			return nil, fmt.Errorf("gate path is required")
 		}
+		if _, err := ownedGateRepoID(mgr.paths, p.Gate); err != nil {
+			return nil, err
+		}
 		result, err := classify(ctx, "", false, true)
 		if err != nil {
 			return nil, err
 		}
 		return &ipc.AdmitPushResult{Context: gateContextResult(result)}, nil
+	})
+
+	srv.Handle(ipc.MethodClaimLaunchReceipt, func(_ context.Context, params json.RawMessage) (interface{}, error) {
+		var p ipc.ClaimLaunchReceiptParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if err := validateLaunchNonce(p.LaunchNonce); err != nil {
+			return nil, err
+		}
+		if err := validateValidationGeneration(p.ValidationGeneration); err != nil {
+			return nil, err
+		}
+		prBaseBranch, err := normalizeRunPRBaseBranch(p.PRBaseBranch)
+		if err != nil {
+			return nil, err
+		}
+		run, claimed, err := d.ClaimLaunchReceipt(p.RepoID, p.Branch, p.LaunchNonce, p.SubmittedHeadSHA, p.ValidationGeneration, p.IntentDigest, prBaseBranch, p.OmitIntent, p.PiProfile)
+		if err != nil {
+			return nil, fmt.Errorf("claim launch receipt: %w", err)
+		}
+		if run == nil {
+			return &ipc.ClaimLaunchReceiptResult{}, nil
+		}
+		if !run.PiProfile.Matches(p.PiProfile) {
+			return nil, fmt.Errorf("conflicting launch_nonce: Pi profile differs from run pin")
+		}
+		if !launchPRBaseBranchMatches(run, prBaseBranch) {
+			return nil, conflictingLaunchPRBaseBranch(p.LaunchNonce)
+		}
+		if p.OmitIntent && !run.OmitIntent {
+			return nil, conflictingLaunchOmitIntent(p.LaunchNonce)
+		}
+
+		receipt, err := receiptForRun(run, claimed)
+		if err != nil {
+			return nil, err
+		}
+		if receipt.SubmittedHeadSHA != p.SubmittedHeadSHA || receipt.ValidationGeneration != p.ValidationGeneration || receipt.IntentDigest != p.IntentDigest {
+			return nil, fmt.Errorf("conflicting launch_nonce is already bound to a different validation generation, submitted head, or intent")
+		}
+		return &ipc.ClaimLaunchReceiptResult{Receipt: &receipt}, nil
+	})
+
+	// Capability probe for --no-publish-intent: see ipc.ProbeOmitIntentResult.
+	srv.Handle(ipc.MethodProbeOmitIntent, func(context.Context, json.RawMessage) (interface{}, error) {
+		return &ipc.ProbeOmitIntentResult{OK: true}, nil
+	})
+
+	srv.Handle(ipc.MethodCaptureVerificationPlan, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var p ipc.CaptureVerificationPlanParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		repo, err := d.GetRepo(p.RepoID)
+		if err != nil {
+			return nil, err
+		}
+		if repo == nil {
+			return nil, fmt.Errorf("unknown repository")
+		}
+		return verificationplan.Capture(mgr.paths.RunInputsDir(), p.SourcePath, p.RepoID, p.Branch, p.HeadSHA)
+	})
+
+	srv.Handle(ipc.MethodReleaseVerificationPlan, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		var p ipc.ReleaseVerificationPlanParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		// Serialize ownership lookup and deletion with every launch for this branch.
+		_, err := mgr.withBranchLock(p.RepoID, p.Branch, func() (string, error) {
+			run, err := d.GetRun(p.CaptureID)
+			if err != nil || run != nil {
+				return "", err
+			}
+			plan, err := verificationplan.Resolve(mgr.paths.RunInputsDir(), p.CaptureID, p.RepoID, p.Branch, p.HeadSHA)
+			if err != nil {
+				return "", err
+			}
+			if plan == nil {
+				return "", fmt.Errorf("verification plan capture ID is required")
+			}
+			return "", os.RemoveAll(filepath.Dir(plan.Path))
+		})
+		return nil, err
+	})
+
+	srv.Handle(ipc.MethodResolvePiProfile, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		var request agentcfg.PiProfile
+		if err := json.Unmarshal(params, &request); err != nil {
+			return nil, fmt.Errorf("invalid Pi profile request")
+		}
+		cfg, err := config.LoadGlobal(mgr.paths.ConfigFile())
+		if err != nil {
+			return nil, fmt.Errorf("load global config: %w", err)
+		}
+		return cfg.ResolvePiProfile(&request)
+	})
+
+	srv.Handle(ipc.MethodStartFreshRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var p ipc.StartFreshRunParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		receipt, err := mgr.HandleStartFreshRun(ctx, &p)
+		if err != nil {
+			return nil, err
+		}
+		return &ipc.StartFreshRunResult{Receipt: receipt}, nil
 	})
 
 	srv.Handle(ipc.MethodRerun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
@@ -1194,7 +1360,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		runID, err := mgr.HandleRerun(ctx, p.RepoID, p.Branch, p.PreviousRunID, p.SkipSteps, p.Intent)
+		runID, err := mgr.HandleRerun(ctx, p.RepoID, p.Branch, p.PreviousRunID, p.SkipSteps, p.Intent, p.PRBaseBranch, p.OmitIntent, p.CallerHeadSHA, p.VerificationPlanID, p.PiProfile)
 		if err != nil {
 			return nil, err
 		}
@@ -1227,10 +1393,21 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		if err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.Instructions, p.AddedFindings); err != nil {
+		if err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason); err != nil {
 			return nil, err
 		}
 		return &ipc.RespondResult{OK: true}, nil
+	})
+
+	srv.Handle(ipc.MethodAnswerReview, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var p ipc.AnswerReviewQuestionParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return mgr.HandleAnswerReviewQuestion(p.RunID, p.QuestionID, p.Answer, p.AnsweredBy)
 	})
 
 	srv.Handle(ipc.MethodCancelRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
@@ -1330,6 +1507,10 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		Error:              r.Error,
 		CIReady:            r.CIReadyAt != nil,
 		CIReadyNoCI:        r.CIReadyNoCI,
+		PRBaseBranch:       r.PRBaseBranch,
+		OmitIntent:         r.OmitIntent,
+		PiProfile:          r.PiProfile,
+		VerificationPlan:   r.VerificationPlan,
 		AwaitingAgent:      r.AwaitingAgentSince != nil,
 		AwaitingAgentSince: r.AwaitingAgentSince,
 		CreatedAt:          r.CreatedAt,
@@ -1338,7 +1519,14 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 	if len(steps) > 0 {
 		info.Steps = make([]ipc.StepResultInfo, 0, len(steps))
 		for _, s := range steps {
-			info.Steps = append(info.Steps, stepToInfo(d, s))
+			stepInfo := stepToInfo(d, s)
+			info.Steps = append(info.Steps, stepInfo)
+			if reason := s.TestOverrideReason(); reason != "" {
+				info.TestOverrideReason = reason
+			}
+			if s.StepName == types.StepCI && info.CIOverrideReason == "" && stepInfo.OverrideReason != "" {
+				info.CIOverrideReason = stepInfo.OverrideReason
+			}
 		}
 	}
 	return info
@@ -1356,10 +1544,22 @@ func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 		FindingsJSON:   s.FindingsJSON,
 		Error:          s.Error,
 		StartedAt:      s.StartedAt,
+		RoundStartedAt: s.RoundStartedAt,
 		CompletedAt:    s.CompletedAt,
 		LastActivityAt: s.LastActivityAt,
 		LastActivity:   s.LastActivity,
 		AgentPID:       s.AgentPID,
+	}
+	if s.StepName == types.StepDocument {
+		if combined, err := d.HasAgentInvocationPurpose(s.RunID, string(s.StepName), "housekeeping"); err == nil && combined {
+			info.WorkScope = ipc.WorkScopeDocumentLintHousekeeping
+		}
+	}
+	if s.OverrideReason != nil {
+		info.OverrideReason = *s.OverrideReason
+	}
+	if s.SkipReason != nil {
+		info.SkipReason = *s.SkipReason
 	}
 	if s.AutoFixLimit != nil {
 		info.AutoFixLimit = *s.AutoFixLimit

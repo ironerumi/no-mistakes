@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -42,14 +43,50 @@ func IsConnectTimeout(err error) bool {
 	return errors.As(err, &timeoutErr)
 }
 
-func connectTimeout() time.Duration {
+// CallTimeoutError reports an IPC method whose response did not arrive before
+// the caller-selected read deadline. The connection was accepted; this is a
+// slow or stuck reply, not a refused dial.
+type CallTimeoutError struct {
+	Method          string
+	TimeoutDuration time.Duration
+	Err             error
+}
+
+func (e *CallTimeoutError) Error() string {
+	return fmt.Sprintf("daemon %s did not reply within %s", e.Method, e.TimeoutDuration)
+}
+
+func (e *CallTimeoutError) Unwrap() error { return e.Err }
+
+func (e *CallTimeoutError) Timeout() bool { return true }
+
+// IsCallTimeout reports whether err was caused by a bounded IPC call read
+// deadline. Connect timeouts are a different failure and do not match.
+func IsCallTimeout(err error) bool {
+	var timeoutErr *CallTimeoutError
+	return errors.As(err, &timeoutErr)
+}
+
+func isReadTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// connectTimeout resolves the bounded connect timeout from the root that owns
+// socketPath, which always sits at <root>/socket. Reading the ambient NM_HOME
+// instead would mis-scope it: a receive hook resolves its root from the gate it
+// was handed and git sets no NM_HOME for a hook, so it would dial one root's
+// daemon under another root's timeout.
+func connectTimeout(socketPath string) time.Duration {
 	value := os.Getenv("NM_DAEMON_CONNECT_TIMEOUT")
 	if value == "" {
-		p, err := paths.New()
-		if err != nil {
-			return config.DefaultDaemonConnectTimeout
-		}
-		cfg, err := config.LoadGlobal(p.ConfigFile())
+		cfg, err := config.LoadGlobal(paths.WithRoot(filepath.Dir(socketPath)).ConfigFile())
 		if err != nil {
 			return config.DefaultDaemonConnectTimeout
 		}
@@ -93,7 +130,7 @@ func Dial(socketPath string) (*Client, error) {
 }
 
 func dialEndpoint(socketPath string) (net.Conn, error) {
-	timeout := connectTimeout()
+	timeout := connectTimeout(socketPath)
 	conn, err := dial(socketPath, timeout)
 	if err != nil {
 		var netErr net.Error
@@ -159,6 +196,13 @@ func (c *Client) CallWithContext(ctx context.Context, method string, params inte
 			return err
 		}
 		if err := c.scanner.Err(); err != nil {
+			if isReadTimeout(err) {
+				return fmt.Errorf("read response: %w", &CallTimeoutError{
+					Method:          method,
+					TimeoutDuration: timeout,
+					Err:             err,
+				})
+			}
 			return fmt.Errorf("read response: %w", err)
 		}
 		return fmt.Errorf("read response: connection closed")
@@ -191,6 +235,15 @@ func (c *Client) Close() error {
 // Returns an event channel, a cancel function (to stop and clean up), and an error.
 // The channel is closed when the run completes, the connection drops, or cancel is called.
 func Subscribe(socketPath string, params *SubscribeParams) (<-chan Event, func(), error) {
+	return SubscribeContext(context.Background(), socketPath, params)
+}
+
+// SubscribeContext is Subscribe with cancellation support while establishing
+// the subscription.
+func SubscribeContext(ctx context.Context, socketPath string, params *SubscribeParams) (<-chan Event, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	conn, err := dialEndpoint(socketPath)
 	if err != nil {
 		return nil, nil, err
@@ -211,13 +264,31 @@ func Subscribe(socketPath string, params *SubscribeParams) (<-chan Event, func()
 	}
 
 	// Read initial response.
+	interruptDone := make(chan struct{})
+	stopInterrupt := context.AfterFunc(ctx, func() {
+		conn.SetReadDeadline(time.Now())
+		close(interruptDone)
+	})
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetReadDeadline(deadline)
+	}
 	if !scanner.Scan() {
+		if !stopInterrupt() {
+			<-interruptDone
+		}
 		conn.Close()
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		if err := scanner.Err(); err != nil {
 			return nil, nil, fmt.Errorf("read response: %w", err)
 		}
 		return nil, nil, fmt.Errorf("read response: connection closed")
 	}
+	if !stopInterrupt() {
+		<-interruptDone
+	}
+	conn.SetReadDeadline(time.Time{})
 	var resp Response
 	if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
 		conn.Close()

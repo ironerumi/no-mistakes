@@ -80,9 +80,9 @@ type sourceInvocation struct {
 	Agent                string `json:"agent"`
 	Model                string `json:"model,omitempty"`
 	DurationMS           int64  `json:"duration_ms"`
-	InputTokens          int    `json:"input_tokens"`
-	OutputTokens         int    `json:"output_tokens"`
-	CacheReadTokens      int    `json:"cache_read_tokens"`
+	InputTokens          *int   `json:"input_tokens,omitempty"`
+	OutputTokens         *int   `json:"output_tokens,omitempty"`
+	CacheReadTokens      *int   `json:"cache_read_tokens,omitempty"`
 	FreshInputTokens     *int   `json:"fresh_input_tokens,omitempty"`
 	DeltaInputTokens     *int   `json:"delta_input_tokens,omitempty"`
 	DeltaOutputTokens    *int   `json:"delta_output_tokens,omitempty"`
@@ -324,6 +324,7 @@ func agentNeutralGlobalConfig(data []byte) ([]byte, error) {
 	delete(raw, "agent")
 	delete(raw, "agent_args_override")
 	delete(raw, "agent_config")
+	delete(raw, "review_agents")
 	out, err := yaml.Marshal(raw)
 	if err != nil {
 		return nil, fmt.Errorf("serialize agent-neutral global config: %w", err)
@@ -431,7 +432,10 @@ func baselineForRound(invocations []db.AgentInvocation, round int) BaselineMetri
 	seen := false
 	complete := true
 	for _, inv := range invocations {
-		if inv.StepName != string(types.StepReview) || inv.Round != round || inv.Purpose != "review" {
+		if inv.StepName != string(types.StepReview) || inv.Round != round {
+			continue
+		}
+		if inv.Purpose != "review" && inv.Purpose != "review-coverage" {
 			continue
 		}
 		seen = true
