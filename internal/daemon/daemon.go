@@ -28,6 +28,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+	"github.com/kunchenguid/no-mistakes/internal/skill"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
@@ -90,6 +91,10 @@ func Run() (retErr error) {
 	}
 	logStartupPhase("environment", environmentStarted)
 
+	// Every installed binary enters here on daemon start, including after an
+	// update or manual replacement. A skill write failure must not block runs.
+	refreshUserSkill()
+
 	// Ensure default config exists, then load it.
 	config.EnsureDefaultGlobalConfig(p.ConfigFile())
 	globalCfg, err := config.LoadGlobal(p.ConfigFile())
@@ -111,6 +116,12 @@ func Run() (retErr error) {
 	logStartupPhase("database", databaseStarted)
 
 	return runWithOptionsLocked(p, d, globalCfg, nil, startupStarted)
+}
+
+func refreshUserSkill() {
+	if _, err := skill.RefreshUser(); err != nil {
+		slog.Warn("refresh user-level agent skill failed", "error", err)
+	}
 }
 
 func prepareDaemonEnvironment() error {

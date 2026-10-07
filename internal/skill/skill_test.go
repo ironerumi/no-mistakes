@@ -3,8 +3,10 @@ package skill
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
 )
@@ -161,6 +163,95 @@ func TestInstallUserWritesUnderHome(t *testing.T) {
 		if string(data) != Markdown() {
 			t.Errorf("%s content does not match Markdown()", base)
 		}
+	}
+}
+
+func TestRefreshUserReplacesStaleAndPreservesCurrent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	stale := filepath.Join(home, InstallBases[0], Name, "SKILL.md")
+	current := filepath.Join(home, InstallBases[1], Name, "SKILL.md")
+	mkdirAll(t, filepath.Dir(stale))
+	mkdirAll(t, filepath.Dir(current))
+	if err := os.WriteFile(stale, []byte("old skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(current, []byte(Markdown()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Unix(1_600_000_000, 0)
+	if err := os.Chtimes(current, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	written, err := RefreshUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(written, []string{filepath.Join(InstallBases[0], Name, "SKILL.md")}) {
+		t.Fatalf("written = %v, want only stale path", written)
+	}
+	data, err := os.ReadFile(stale)
+	if err != nil || string(data) != Markdown() {
+		t.Fatalf("stale skill not refreshed: %v", err)
+	}
+	info, err := os.Stat(current)
+	if err != nil || !info.ModTime().Equal(oldTime) {
+		t.Fatalf("current skill was rewritten: info=%v err=%v", info, err)
+	}
+	written, err = RefreshUser()
+	if err != nil || len(written) != 0 {
+		t.Fatalf("second refresh wrote %v: %v", written, err)
+	}
+}
+
+func TestRefreshUserCreatesMissingDirectories(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	written, err := RefreshUser()
+	if err != nil || len(written) != len(InstallBases) {
+		t.Fatalf("refresh into empty home: written=%v err=%v", written, err)
+	}
+	for _, base := range InstallBases {
+		data, err := os.ReadFile(filepath.Join(home, base, Name, "SKILL.md"))
+		if err != nil || string(data) != Markdown() {
+			t.Fatalf("%s: skill not created: %v", base, err)
+		}
+	}
+}
+
+func TestRefreshUserCreatesMissingDirectoriesThroughSymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	mkdirAll(t, filepath.Join(home, ".claude"))
+	symlink(t, filepath.Join("..", ".agents", "skills"), filepath.Join(home, ".claude", "skills"))
+	written, err := RefreshUser()
+	// Both logical bases share one real file, so the second is already current.
+	if err != nil || !slices.Equal(written, []string{filepath.Join(InstallBases[0], Name, "SKILL.md")}) {
+		t.Fatalf("refresh through dangling base symlink: written=%v err=%v", written, err)
+	}
+	for _, base := range InstallBases {
+		data, err := os.ReadFile(filepath.Join(home, base, Name, "SKILL.md"))
+		if err != nil || string(data) != Markdown() {
+			t.Fatalf("%s: current skill missing through base: %v", base, err)
+		}
+	}
+	written, err = RefreshUser()
+	if err != nil || len(written) != 0 {
+		t.Fatalf("second refresh through symlink wrote %v: %v", written, err)
+	}
+}
+
+func TestRefreshUserReportsWriteFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	file := filepath.Join(home, InstallBases[0], Name, "SKILL.md")
+	mkdirAll(t, file) // a directory cannot be read or overwritten as SKILL.md
+	if _, err := RefreshUser(); err == nil {
+		t.Fatal("expected refresh failure for unwritable SKILL.md")
 	}
 }
 
