@@ -135,6 +135,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		purpose = "housekeeping"
 	}
 
+	preDocumentHead := sctx.Run.HeadSHA
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
@@ -156,6 +157,11 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	committed, err := commitAgentFixesWithResult(sctx, s.Name(), commitSummary, fallbackSummary, result)
 	if err != nil {
 		return nil, err
+	}
+
+	pointerFindings, err := auditDocumentPointers(ctx, sctx.WorkDir, preDocumentHead, sctx.Run.HeadSHA)
+	if err != nil {
+		return nil, fmt.Errorf("audit document pointers: %w", err)
 	}
 
 	// Without trustworthy structured output we cannot confirm the agent
@@ -183,6 +189,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		}
 	}
 
+	docFindings.Items = append(docFindings.Items, pointerFindings...)
 	needsApproval := len(docFindings.Items) > 0
 	findingsJSON, _ := json.Marshal(docFindings)
 
