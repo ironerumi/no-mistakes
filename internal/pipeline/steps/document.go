@@ -165,6 +165,11 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	}
 	changesApplied := committed || sctx.Run.HeadSHA != headBefore
 
+	pointerFindings, err := auditDocumentPointers(ctx, sctx.WorkDir, headBefore, sctx.Run.HeadSHA)
+	if err != nil {
+		return nil, fmt.Errorf("audit document pointers: %w", err)
+	}
+
 	// Without trustworthy structured output we cannot confirm the agent
 	// resolved every gap. Fail the step rather than creating an approval gate:
 	// unattended AXI modes can resolve a gate, but must never certify opaque
@@ -190,6 +195,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		}
 	}
 
+	docFindings.Items = append(docFindings.Items, pointerFindings...)
 	needsApproval := len(docFindings.Items) > 0
 	findingsJSON, _ := json.Marshal(docFindings)
 
