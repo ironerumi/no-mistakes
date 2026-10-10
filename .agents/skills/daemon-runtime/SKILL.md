@@ -1,6 +1,6 @@
 ---
 name: daemon-runtime
-description: Use when changing daemon startup, singleton ownership, shutdown, logging, event subscriptions, or lifecycle commands.
+description: Use when changing daemon startup, singleton ownership, shutdown, logging, event subscriptions, lifecycle commands, or the daemon's login-shell environment.
 user-invocable: false
 metadata:
   internal: true
@@ -19,7 +19,7 @@ metadata:
 **Bounded Daemon Logging and Event-Driven AXI Runs**
 
 - `internal/logstore` owns all daemon-process byte and retention bounds. Lifecycle output uses `logs/daemon.log`, managed Rovo Dev/OpenCode stdout and stderr use `logs/managed-server.log`, and service bootstrap/direct crash output uses `logs/daemon-bootstrap.log`. Rotation snapshots backups and truncates the current inode in place so held service and child descriptors keep writing to the bounded current file. Regressions: `internal/logstore/rotate_test.go`, `TestDetachedDaemonUsesBoundedDedicatedLogSinks`, `TestManagedServerOutputIsSeparatedFromLifecycleFailureSummary`.
-- Successful read-only IPC methods are DEBUG; mutations and stream starts are INFO; every request failure is WARN. AXI run driving is subscribe-first and `internal/cli/run_reconciler.go` is the sole owner of event reconciliation, reconnect, duplicate-event coalescing, and the slow lost-event heartbeat. Do not reintroduce fixed-interval `get_run` polling. Regressions: `TestSuccessfulReadRequestsDoNotLogAtInfo`, `TestRequestLoggingKeepsMutationsAndFailuresVisible`, `TestDriveRun_HealthyWaitStaysWithinRequestBudget`, `TestRunReconciler_*`.
+- Successful read-only IPC methods are DEBUG; mutations and stream starts are INFO; every request failure is WARN. AXI run driving is subscribe-first and `internal/cli/run_reconciler.go` is the sole owner of event reconciliation, reconnect, duplicate-event coalescing, and the slow lost-event heartbeat. Do not reintroduce fixed-interval `get_run` polling. A pre-drive `get_active_run` or `get_run` state read that misses its per-attempt deadline is a slow reply, not a dead daemon: classify the timeout, health-probe, and retry. `axi run`/`axi respond` default `--wait 8m` independently so the hold cannot sit on a 10-minute harness cap, and subscription acknowledgement must honor that context. Regressions: `TestSuccessfulReadRequestsDoNotLogAtInfo`, `TestRequestLoggingKeepsMutationsAndFailuresVisible`, `TestDriveRun_HealthyWaitStaysWithinRequestBudget`, `TestDriveRun_SlowGetRunRetriesAfterHealthProbe`, `TestAxiRun_SlowActiveRunReadRetriesInsteadOfStartingAnotherRun`, `TestAxiRespond_SlowInitialRunReadRetries`, `TestAxiRun_WaitInterruptsSubscriptionAcknowledgement`, `TestAxiRun_WaitElapsedAgainstLiveIdleDaemon`, `TestRunReconciler_*`.
 
 **Bounded Loss-Aware Event Subscriptions**
 
@@ -34,3 +34,10 @@ metadata:
 - `daemon stop`, `daemon restart`, and `update` refuse by default while pending/running runs exist (the daemon is machine-wide, so stopping it can fail every active pipeline), list the runs via the shared `lifecycle.ActiveRuns`/`lifecycle.RunList` helpers, and require an explicit `--force`. `update -y` answers only the different-executable prompt and deliberately does not bypass this guard.
 - Every invocation of the three commands is logged with caller attribution (PID, PPID, parent command line) via `logLifecycleInvocation` to `<NM_HOME>/logs/cli.log`; this is the incident forensic trail, do not remove or weaken it.
 - Regressions: `TestDaemonStopRefusesWithActiveRunsAndListsThem`, `TestDaemonStopForceOverridesActiveRunGuard`, `TestDaemonRestartRefusesWithActiveRuns`, `TestLifecycleCommandsWriteCallerAttributionToCLILog` (`internal/cli/daemon_lifecycle_test.go`), `TestUpdaterRunRefusesWithActiveRunsAndListsThem`, `TestUpdaterActiveRunGuardAllowsForce` (`internal/update`).
+
+**Daemon Login-Shell Environment (`internal/shellenv`)**
+
+- The managed service definition's `PATH` (`managedServicePath`, `internal/daemon/service_launchd.go` / `service_systemd.go`) is the deterministic bootstrap list, never a probe result; the effective environment comes from `shellenv.ApplyToProcessWithShellRetryExcept` at daemon startup (`prepareDaemonEnvironment`) and is what every step and agent subprocess inherits. Changing the bootstrap list does not supply version-manager directories; the startup probe determines the effective `PATH`.
+- The probe (`$SHELL -l -i -c 'env -0'`) runs in its own session (`detachFromTerminal`, Setsid): a Setpgid child of a terminal's foreground process is stopped by SIGTTIN as soon as interactive zsh initializes job control, so a foreground `daemon run` used to burn the whole timeout and degrade. Do not fold this back into `ConfigureShellCommand`; Setpgid and Setsid cannot be combined.
+- Only a missing shell binary (`shellBinaryMissing`: fork/exec ENOENT or an unresolvable name) is waited for, and only at startup (`DefaultShellRetryWindow`): on macOS with nix-darwin the login shell lives under `/run/current-system`, which the activate-system daemon recreates after the Nix store mounts, so a RunAtLoad launch agent can race it (#143). A shell that exists but fails is never waited for. The environment is resolved once per daemon lifetime; restart the daemon to pick up a login shell that appeared or changed later.
+- Regressions: `internal/shellenv/shellenv_retry_test.go` (incl. `TestDefaultShellCommandOutput_InteractiveShellFromForegroundTerminal`, which re-executes the test binary under `script(1)` to own a pty).

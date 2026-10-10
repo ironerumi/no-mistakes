@@ -51,6 +51,7 @@ type Host struct {
 	org          string // organization URL, e.g. https://dev.azure.com/myorg
 	project      string // project name (may contain spaces)
 	repo         string // repository name
+	draft        bool   // open created PRs as drafts (az repos pr create --draft true)
 }
 
 // New builds a Host. cliAvailable reports whether the az binary is resolvable
@@ -67,6 +68,14 @@ func New(cmd CmdFactory, cliAvailable func() bool, org, project, repo string) *H
 		project:      strings.TrimSpace(project),
 		repo:         strings.TrimSpace(repo),
 	}
+}
+
+// NewWithDraft builds a Host that opens created PRs as drafts when draft is
+// true (az repos pr create --draft true). See New for the other parameters.
+func NewWithDraft(cmd CmdFactory, cliAvailable func() bool, org, project, repo string, draft bool) *Host {
+	h := New(cmd, cliAvailable, org, project, repo)
+	h.draft = draft
+	return h
 }
 
 func (h *Host) Provider() scm.Provider { return scm.ProviderAzureDevOps }
@@ -158,24 +167,47 @@ func (h *Host) validateListedPR(candidate azPR) error {
 	if candidate.PullRequestID <= 0 {
 		return errors.New("missing positive pullRequestId")
 	}
-	org, project, repo, err := parseRepositoryWebURL(candidate.Repository.WebURL)
-	if err != nil {
-		return err
+	// az repos pr list often omits repository.webUrl (null in list payloads;
+	// the show endpoint supplies it). Organization is already pinned by the
+	// list command's --organization flag, so a missing URL is identified by
+	// repository.name and repository.project.name instead of a second show
+	// call. A nonempty URL is still parsed and must match; names never
+	// rescue a malformed URL.
+	if candidate.Repository.WebURL != "" {
+		org, project, repo, err := parseRepositoryWebURL(candidate.Repository.WebURL)
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(azureOrganizationName(org), azureOrganizationName(h.org)) {
+			return fmt.Errorf("repository organization %q does not match configured organization %q", org, h.org)
+		}
+		if !strings.EqualFold(project, h.project) {
+			return fmt.Errorf("repository project %q does not match configured project %q", project, h.project)
+		}
+		if !strings.EqualFold(repo, h.repo) {
+			return fmt.Errorf("repository name %q does not match configured repository %q", repo, h.repo)
+		}
+		if name := strings.TrimSpace(candidate.Repository.Name); name != "" && !strings.EqualFold(name, h.repo) {
+			return fmt.Errorf("repository metadata name %q does not match configured repository %q", name, h.repo)
+		}
+		if name := strings.TrimSpace(candidate.Repository.Project.Name); name != "" && !strings.EqualFold(name, h.project) {
+			return fmt.Errorf("repository metadata project %q does not match configured project %q", name, h.project)
+		}
+		return nil
 	}
-	if !strings.EqualFold(azureOrganizationName(org), azureOrganizationName(h.org)) {
-		return fmt.Errorf("repository organization %q does not match configured organization %q", org, h.org)
-	}
-	if !strings.EqualFold(project, h.project) {
-		return fmt.Errorf("repository project %q does not match configured project %q", project, h.project)
+	repo := strings.TrimSpace(candidate.Repository.Name)
+	if repo == "" {
+		return errors.New("missing repository.name")
 	}
 	if !strings.EqualFold(repo, h.repo) {
-		return fmt.Errorf("repository name %q does not match configured repository %q", repo, h.repo)
+		return fmt.Errorf("repository metadata name %q does not match configured repository %q", repo, h.repo)
 	}
-	if name := strings.TrimSpace(candidate.Repository.Name); name != "" && !strings.EqualFold(name, h.repo) {
-		return fmt.Errorf("repository metadata name %q does not match configured repository %q", name, h.repo)
+	project := strings.TrimSpace(candidate.Repository.Project.Name)
+	if project == "" {
+		return errors.New("missing repository.project.name")
 	}
-	if name := strings.TrimSpace(candidate.Repository.Project.Name); name != "" && !strings.EqualFold(name, h.project) {
-		return fmt.Errorf("repository metadata project %q does not match configured project %q", name, h.project)
+	if !strings.EqualFold(project, h.project) {
+		return fmt.Errorf("repository metadata project %q does not match configured project %q", project, h.project)
 	}
 	return nil
 }
@@ -270,6 +302,9 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 			"--title", content.Title,
 			"--description", descArg,
 		}
+		if h.draft {
+			args = append(args, "--draft", "true")
+		}
 		args = append(args, h.scopeArgs()...)
 		return append(args, "--output", "json")
 	})
@@ -289,9 +324,9 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		return nil, errors.New("az repos pr update: missing PR id")
 	}
 	if _, err := h.runWithDescription(ctx, content.Body, func(descArg string) []string {
-		args := []string{"repos", "pr", "update", "--id", id,
-			"--title", content.Title,
-			"--description", descArg,
+		args := []string{"repos", "pr", "update", "--id", id, "--description", descArg}
+		if content.Title != "" {
+			args = append(args, "--title", content.Title)
 		}
 		args = append(args, h.orgArgs()...)
 		return append(args, "--output", "json")
@@ -333,8 +368,13 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 		if bucket == "" {
 			continue
 		}
+		providerID := ""
+		if id := strings.TrimSpace(e.EvaluationID); id != "" {
+			providerID = "azure-policy-evaluation:" + id
+		}
 		checks = append(checks, scm.Check{
 			Name:        e.checkName(),
+			ProviderID:  providerID,
 			Bucket:      bucket,
 			CompletedAt: parseAzTime(e.CompletedDate),
 		})

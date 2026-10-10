@@ -2,16 +2,39 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestExecutorAutomaticSkipReasonRedactsCredentials(t *testing.T) {
+	database, p, r, repo := setupTest(t)
+	executor := NewExecutor(database, p, nil, nil, []Step{&mockStep{
+		name:    types.StepCI,
+		outcome: &StepOutcome{Skipped: true, SkipReason: "unavailable https://operator:secret@forge.example/repo"},
+	}}, nil)
+	if err := executor.Execute(context.Background(), r, repo, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	results, err := database.GetStepsByRun(r.ID)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("steps = %+v, %v", results, err)
+	}
+	reason := results[0].SkipReason
+	if reason == nil || strings.Contains(*reason, "secret") || !strings.Contains(*reason, "forge.example") {
+		t.Fatalf("skip cause should retain the host and redact credentials: %v", reason)
+	}
+}
 
 // TestExecutor_StepLifecycleEvents verifies the executor emits step_started
 // and step_completed IPC events for every step in order. The broader
@@ -79,14 +102,31 @@ func TestExecutor_RestartsValidationFromRequestedStep(t *testing.T) {
 			return &StepOutcome{}, nil
 		}}
 	}
+	// The CI step behaves like the real one: its first observation reports an
+	// auto-fix finding, the executor's fix round repairs it and asks for
+	// revalidation, and the observation after the restart is green.
 	ciCalls := 0
-	ci := &adaptiveCallStep{name: types.StepCI, fn: func(*StepContext) (*StepOutcome, error) {
+	ci := &adaptiveCallStep{name: types.StepCI, fn: func(sctx *StepContext) (*StepOutcome, error) {
 		order = append(order, types.StepCI)
 		ciCalls++
-		if ciCalls == 1 {
+		switch {
+		case ciCalls == 1:
+			return &StepOutcome{
+				NeedsApproval: true,
+				AutoFixable:   true,
+				Findings:      `{"findings":[{"severity":"error","description":"CI check failing: test","action":"auto-fix","category":"ci-check","check":"test"}],"summary":"1 CI check failing"}`,
+			}, nil
+		case ciCalls == 2:
+			if !sctx.Fixing || sctx.PreviousFindings == "" {
+				t.Errorf("fix round: Fixing=%v PreviousFindings=%q, want the auto-fix findings handed over", sctx.Fixing, sctx.PreviousFindings)
+			}
 			return &StepOutcome{RestartFrom: types.StepReview}, nil
+		default:
+			if sctx.Fixing {
+				t.Error("post-restart observation must not run as a fix round")
+			}
+			return &StepOutcome{}, nil
 		}
-		return &StepOutcome{}, nil
 	}}
 	cycle := []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR}
 	steps := make([]Step, 0, len(cycle)+1)
@@ -94,16 +134,17 @@ func TestExecutor_RestartsValidationFromRequestedStep(t *testing.T) {
 		steps = append(steps, pass(name))
 	}
 	steps = append(steps, ci)
-	exec := NewExecutor(database, p, nil, nil, steps, nil)
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{CI: 1}}, nil, steps, nil)
 
 	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if ciCalls != 2 {
-		t.Fatalf("CI executions = %d, want 2", ciCalls)
+	if ciCalls != 3 {
+		t.Fatalf("CI executions = %d, want 3 (observation, fix round, post-restart observation)", ciCalls)
 	}
-	want := append(append([]types.StepName{}, cycle...), types.StepCI)
-	want = append(want, want...)
+	want := append(append([]types.StepName{}, cycle...), types.StepCI, types.StepCI)
+	want = append(want, cycle...)
+	want = append(want, types.StepCI)
 	if !slices.Equal(order, want) {
 		t.Fatalf("execution order = %v, want %v", order, want)
 	}
@@ -116,6 +157,31 @@ func TestExecutor_RestartsValidationFromRequestedStep(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetRoundsByStep(%s) error = %v", result.StepName, err)
 		}
+		if result.StepName == types.StepCI {
+			// The observation, the fix round that restarted validation, and
+			// the post-restart observation: the auto-fix trigger comes from
+			// the executor driving the round, not from a CI special case.
+			if len(rounds) != 3 || rounds[0].Round != 1 || rounds[1].Round != 2 || rounds[2].Round != 3 {
+				t.Errorf("CI rounds = %v, want [1 2 3]", roundNumbers(rounds))
+				continue
+			}
+			if rounds[0].Trigger != "initial" || rounds[1].Trigger != "auto_fix" || rounds[2].Trigger != "initial" {
+				t.Errorf("CI round triggers = [%s %s %s], want [initial auto_fix initial]", rounds[0].Trigger, rounds[1].Trigger, rounds[2].Trigger)
+			}
+			if rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != db.RoundSelectionSourceAutoFix {
+				t.Errorf("observation round selection source = %v, want auto_fix so the attempt survives the restart", rounds[0].SelectionSource)
+			}
+			// The spent attempt is what a restarted or recovered executor
+			// restores: ResetStepsFrom leaves the round history alone.
+			state, err := exec.durableExecutionState(result.ID)
+			if err != nil {
+				t.Fatalf("durableExecutionState() error = %v", err)
+			}
+			if state.autoFixAttempts != 1 {
+				t.Errorf("durable auto-fix attempts after the restart = %d, want 1", state.autoFixAttempts)
+			}
+			continue
+		}
 		if len(rounds) != 2 {
 			t.Errorf("%s rounds = %v, want [1 2]", result.StepName, roundNumbers(rounds))
 			continue
@@ -123,9 +189,50 @@ func TestExecutor_RestartsValidationFromRequestedStep(t *testing.T) {
 		if rounds[0].Round != 1 || rounds[1].Round != 2 {
 			t.Errorf("%s rounds = %v, want [1 2]", result.StepName, roundNumbers(rounds))
 		}
-		if result.StepName == types.StepCI && rounds[0].Trigger != "auto_fix" {
-			t.Errorf("first CI round trigger = %q, want auto_fix", rounds[0].Trigger)
+	}
+}
+
+func TestExecutor_RevalidationClearsReviewCarry(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	reviewCalls := 0
+	review := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		reviewCalls++
+		if reviewCalls == 1 {
+			return &StepOutcome{
+				NeedsApproval: true,
+				Findings:      `{"findings":[{"id":"review-1","severity":"warning","description":"review needed","action":"ask-user"}],"summary":"review needed"}`,
+			}, nil
 		}
+		return &StepOutcome{}, nil
+	}}
+	ciCalls := 0
+	ci := &adaptiveCallStep{name: types.StepCI, fn: func(*StepContext) (*StepOutcome, error) {
+		ciCalls++
+		if ciCalls == 1 {
+			return &StepOutcome{RestartFrom: types.StepReview}, nil
+		}
+		return &StepOutcome{}, nil
+	}}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{review, ci}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("approve initial review: %v", err)
+	}
+	waitExecutorDone(t, done)
+
+	if reviewCalls != 2 || ciCalls != 2 {
+		t.Fatalf("calls = review %d, ci %d; want two each", reviewCalls, ciCalls)
+	}
+	completed, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != types.RunCompleted {
+		t.Fatalf("run status = %s, want %s", completed.Status, types.RunCompleted)
 	}
 }
 
@@ -352,6 +459,32 @@ func TestExecutor_StepError_FailsRun(t *testing.T) {
 	}
 }
 
+func TestExecutor_OutOfMemoryFailureReasonKeepsRestorationDetail(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	const snapshot = "/tmp/nm-recovery-snapshot"
+	stepErr := errors.Join(
+		fmt.Errorf("run prepare command: %w", shellenv.ErrOutOfMemory),
+		fmt.Errorf("restore pre-preparation changes; recovery snapshot retained at %s: %w", snapshot, errors.New("git stash apply failed")),
+	)
+
+	exec := NewExecutor(database, p, nil, nil, []Step{newFailStep(types.StepTest, stepErr)}, nil)
+	err := exec.Execute(context.Background(), run, repo, t.TempDir())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	dbSteps, _ := database.GetStepsByRun(run.ID)
+	if dbSteps[0].Error == nil {
+		t.Fatal("failed step has no recorded reason")
+	}
+	reason := *dbSteps[0].Error
+	for _, want := range []string{"git stash apply failed", snapshot, shellenv.ErrOutOfMemory.Error()} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("step failure reason %q is missing %q", reason, want)
+		}
+	}
+}
+
 func TestExecutor_FailedStepEmitsTelemetry(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
@@ -548,5 +681,82 @@ func TestExecutor_ConfiguredSkippedStepDoesNotExecuteAndContinues(t *testing.T) 
 		if step.StepName == types.StepReview && step.Status != types.StepStatusSkipped {
 			t.Fatalf("review status = %s, want %s", step.Status, types.StepStatusSkipped)
 		}
+	}
+}
+
+func TestExecutor_SkippedPRStepWithClosingIssueRefsFails(t *testing.T) {
+	for _, refs := range [][]string{nil, {"95"}} {
+		t.Run(fmt.Sprintf("closes=%v", refs), func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			if refs != nil {
+				if err := database.UpdateRunClosingIssueRefs(run.ID, refs); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pr := newPassStep(types.StepPR)
+			exec := NewExecutor(database, p, nil, nil, []Step{pr}, nil)
+			exec.SetSkippedSteps([]types.StepName{types.StepPR})
+
+			err := exec.Execute(context.Background(), run, repo, t.TempDir())
+			if got := pr.callCount(); got != 0 {
+				t.Fatalf("skipped PR step executed %d times, want 0", got)
+			}
+			steps, stepsErr := database.GetStepsByRun(run.ID)
+			if stepsErr != nil || len(steps) != 1 {
+				t.Fatalf("steps = %+v, err = %v", steps, stepsErr)
+			}
+			if refs == nil {
+				if err != nil || steps[0].Status != types.StepStatusSkipped {
+					t.Fatalf("err = %v, status = %s; want skipped", err, steps[0].Status)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "--closes requires publishing a pull request") {
+				t.Fatalf("err = %v; want --closes refusal", err)
+			}
+			if steps[0].Status != types.StepStatusFailed {
+				t.Fatalf("status = %s, want %s", steps[0].Status, types.StepStatusFailed)
+			}
+			if err := database.UpdateRunClosingIssueRefs(run.ID, []string{"95", "96"}); err == nil {
+				t.Fatal("reattach after the skipped PR step must be refused")
+			}
+		})
+	}
+}
+
+func TestExecutor_SkipRemainingPastPRStepWithClosingIssueRefsFails(t *testing.T) {
+	for _, refs := range [][]string{nil, {"95"}} {
+		t.Run(fmt.Sprintf("closes=%v", refs), func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			if refs != nil {
+				if err := database.UpdateRunClosingIssueRefs(run.ID, refs); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rebase := &mockStep{name: types.StepRebase, outcome: &StepOutcome{ExitCode: 0, SkipRemaining: true}}
+			pr := newPassStep(types.StepPR)
+			exec := NewExecutor(database, p, nil, nil, []Step{rebase, pr}, nil)
+
+			err := exec.Execute(context.Background(), run, repo, t.TempDir())
+			if got := pr.callCount(); got != 0 {
+				t.Fatalf("PR step executed %d times, want 0", got)
+			}
+			steps, stepsErr := database.GetStepsByRun(run.ID)
+			if stepsErr != nil || len(steps) != 2 {
+				t.Fatalf("steps = %+v, err = %v", steps, stepsErr)
+			}
+			if refs == nil {
+				if err != nil || steps[1].Status != types.StepStatusSkipped {
+					t.Fatalf("err = %v, status = %s; want skipped", err, steps[1].Status)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "--closes requires publishing a pull request") {
+				t.Fatalf("err = %v; want --closes refusal", err)
+			}
+			if steps[1].Status != types.StepStatusFailed {
+				t.Fatalf("status = %s, want %s", steps[1].Status, types.StepStatusFailed)
+			}
+		})
 	}
 }
