@@ -161,7 +161,7 @@ With trusted [`review.post_review_pass: true`](/no-mistakes/reference/repo-confi
 
 - The base commit is the review-approved commit, so the reviewable set and the coverage contract are the files those commits changed. The prompt tells the reviewer the commits are pipeline-authored and that the approved change is context only.
 - Findings, the gate, and `auto_fix.review` rounds work as in any review. The pass starts a fresh outstanding set and shares the step's `auto_fix.review` budget, as a restart at Review does. Its first round is recorded with trigger `post_review` and labelled in the PR body's Review details.
-- When the pass completes, clean or approved at its gate, the review-approved commit advances to the head it reviewed and Push runs again from the top; a commit that run makes gets a pass of its own. Skipping the pass at its gate publishes without it, and aborting fails the run.
+- When the pass completes, clean or approved at its gate, the review-approved commit advances to the head it reviewed and Push runs again from the top; a commit that run makes gets a pass of its own. Skipping a parked post-review pass publishes without it, and aborting fails the run. Skipping Review before any approval still leaves Push without an approval binding, so Push fails closed.
 - Test, Document, and Lint are not re-run and the step order is unchanged. A daemon restart while the pass is parked resumes the pass and then Push.
 - CI repairs made after publication are outside the pass; [`ci.revalidate_repairs`](/no-mistakes/reference/repo-config/#cirevalidate_repairs) governs them.
 
@@ -253,7 +253,7 @@ Pushes the validated branch to the configured push target.
 
 - If `commands.format` is set, ensures [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) has succeeded once for the isolated worktree, then runs the formatter
 - Commits any uncommitted changes left by pipeline agents or the formatter with message `no-mistakes: apply agent fixes`
-- With [`review.post_review_pass`](/no-mistakes/reference/repo-config/#reviewpost_review_pass) on, publishes nothing while the head it would publish is past the review-approved commit: Review first runs a [post-review pass](#post-review-pass) over exactly those commits, then Push runs again from the top. A Review step skipped by `--skip` or at the pass's own gate asks for no pass
+- With [`review.post_review_pass`](/no-mistakes/reference/repo-config/#reviewpost_review_pass) on, publishes nothing while the head it would publish is past the review-approved commit: Review first runs a [post-review pass](#post-review-pass) over exactly those commits, then Push runs again from the top. Skipping a parked post-review pass is the explicit decision to publish without it; skipping Review before any approval leaves Push fail-closed.
 - Without fork routing, successful run-start validation selects the upstream URL from the working clone; when it matches the gate worktree's `origin`, the worktree URL is used so embedded credentials retained outside the database can authenticate. If validation fails, the run continues with its prior routing.
 - With GitHub fork routing, the push target is `repos.fork_url`
 - Immediately before remote mutation, reloads the durable review-approved commit and refuses to push when that binding is missing, malformed, or unreachable
