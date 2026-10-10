@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"os/exec"
 	"strconv"
@@ -27,6 +28,12 @@ type Host struct {
 	host         string // repo's GitHub hostname; scopes the auth check
 	repo         string // "owner/name" slug for --repo; empty when unknown
 	forkOwner    string // fork owner for cross-repository PR heads
+	draft        bool   // open created PRs as drafts (gh pr create --draft)
+	// assetHTTP and assetUploadPrefix override the unofficial user-attachments
+	// upload transport in tests. Production leaves both nil/empty and uses
+	// http.DefaultClient against uploads.github.com (or uploads.<ghec-host>).
+	assetHTTP         *http.Client
+	assetUploadPrefix string
 }
 
 // New builds a Host. cliAvailable reports whether the gh binary is
@@ -51,10 +58,11 @@ func New(cmd CmdFactory, cliAvailable func() bool, host, repo string) *Host {
 // NewWithFork builds a Host that opens PRs on repo using forkRepo as the head
 // repository owner. forkRepo is an "owner/name" slug; only the owner is needed
 // because gh pr create expects --head <owner>:<branch>. host is optional; see
-// New for its role in scoping the auth check.
-func NewWithFork(cmd CmdFactory, cliAvailable func() bool, host, repo, forkRepo string) *Host {
+// New for its role in scoping the auth check. draft opens created PRs as drafts.
+func NewWithFork(cmd CmdFactory, cliAvailable func() bool, host, repo, forkRepo string, draft bool) *Host {
 	h := New(cmd, cliAvailable, host, repo)
 	h.forkOwner = repoOwner(forkRepo)
+	h.draft = draft
 	return h
 }
 
@@ -322,6 +330,9 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 		"--head", h.headRef(branch),
 		"--base", base,
 	}, h.repoArgs()...)
+	if h.draft {
+		args = append(args, "--draft")
+	}
 	args = append(args, "--title", content.Title, "--body-file", "-")
 	cmd := h.cmd(ctx, "gh", args...)
 	cmd.Stdin = strings.NewReader(content.Body)
@@ -369,13 +380,30 @@ func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, err
 		return scm.PRContent{}, fmt.Errorf("gh pr view: %w", err)
 	}
 	var parsed struct {
-		Title string `json:"title"`
-		Body  string `json:"body"`
+		Title *string `json:"title"`
+		Body  *string `json:"body"`
 	}
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		return scm.PRContent{}, fmt.Errorf("parse gh pr view: %w", err)
 	}
-	return scm.PRContent{Title: parsed.Title, Body: parsed.Body}, nil
+	if parsed.Title == nil || parsed.Body == nil {
+		return scm.PRContent{}, fmt.Errorf("parse gh pr view: missing or null title/body")
+	}
+	return scm.PRContent{Title: *parsed.Title, Body: *parsed.Body}, nil
+}
+
+func (h *Host) SetPRBaseBranch(ctx context.Context, pr *scm.PR, baseBranch string) error {
+	selector, err := prSelector(pr)
+	if err != nil {
+		return err
+	}
+	args := append([]string{"pr", "edit", selector}, h.repoArgs()...)
+	args = append(args, "--base", baseBranch)
+	cmd := h.cmd(ctx, "gh", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("gh pr edit --base: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
@@ -488,7 +516,11 @@ func (h *Host) getPRChecks(ctx context.Context, selector string) ([]scm.Check, e
 	return checks, nil
 }
 
-const commitChecksQuery = `query($owner:String!,$name:String!,$oid:String!,$cursor:String){repository(owner:$owner,name:$name){object(expression:$oid){... on Commit{statusCheckRollup{contexts(first:100,after:$cursor){nodes{__typename ... on CheckRun{name status conclusion completedAt startedAt detailsUrl} ... on StatusContext{context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}`
+// commitChecksQuery reads the head commit's check rollup. A CheckRun also
+// carries its check suite's app slug: that is the structural identity the CI
+// step uses to tell a third-party review bot's check (scm.ReviewBots) from the
+// repository's own Actions jobs, without matching check names.
+const commitChecksQuery = `query($owner:String!,$name:String!,$oid:String!,$cursor:String){repository(owner:$owner,name:$name){object(expression:$oid){... on Commit{statusCheckRollup{contexts(first:100,after:$cursor){nodes{__typename ... on CheckRun{databaseId name status conclusion completedAt startedAt detailsUrl checkSuite{app{slug}}} ... on StatusContext{id context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}`
 
 const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved comments(first:100){nodes{databaseId body path line url createdAt author{login}}}} pageInfo{hasNextPage endCursor}}}}}`
 
@@ -522,15 +554,22 @@ func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check
 							Contexts struct {
 								Nodes []struct {
 									Type        string `json:"__typename"`
+									DatabaseID  int64  `json:"databaseId"`
+									ID          string `json:"id"`
 									Name        string `json:"name"`
 									Status      string `json:"status"`
 									Conclusion  string `json:"conclusion"`
 									CompletedAt string `json:"completedAt"`
 									StartedAt   string `json:"startedAt"`
 									DetailsURL  string `json:"detailsUrl"`
-									Context     string `json:"context"`
-									State       string `json:"state"`
-									TargetURL   string `json:"targetUrl"`
+									CheckSuite  *struct {
+										App *struct {
+											Slug string `json:"slug"`
+										} `json:"app"`
+									} `json:"checkSuite"`
+									Context   string `json:"context"`
+									State     string `json:"state"`
+									TargetURL string `json:"targetUrl"`
 								} `json:"nodes"`
 								PageInfo struct {
 									HasNextPage bool   `json:"hasNextPage"`
@@ -558,6 +597,9 @@ func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check
 			case "CheckRun":
 				check.Kind = scm.CheckKindRun
 				check.Name = strings.TrimSpace(node.Name)
+				if node.DatabaseID != 0 {
+					check.ProviderID = fmt.Sprintf("github-check-run:%d", node.DatabaseID)
+				}
 				check.State = strings.ToUpper(strings.TrimSpace(node.Conclusion))
 				if check.State == "" {
 					check.State = strings.ToUpper(strings.TrimSpace(node.Status))
@@ -567,6 +609,9 @@ func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check
 					check.Bucket = normalizeCheckBucket("", node.Status)
 				}
 				check.Link = strings.TrimSpace(node.DetailsURL)
+				if node.CheckSuite != nil && node.CheckSuite.App != nil {
+					check.App = strings.TrimSpace(node.CheckSuite.App.Slug)
+				}
 				if parsed, parseErr := time.Parse(time.RFC3339, node.CompletedAt); parseErr == nil {
 					check.CompletedAt = parsed
 				}
@@ -576,6 +621,9 @@ func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check
 			case "StatusContext":
 				check.Kind = scm.CheckKindStatus
 				check.Name = strings.TrimSpace(node.Context)
+				if node.ID != "" {
+					check.ProviderID = "github-status:" + node.ID
+				}
 				check.State = strings.ToUpper(strings.TrimSpace(node.State))
 				check.Bucket = normalizeCheckBucket("", node.State)
 				check.Link = strings.TrimSpace(node.TargetURL)
@@ -640,8 +688,8 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 // same gate check, and the rollup keeps both the old FAILURE and the new
 // SUCCESS forever. Without this collapse the superseded failure stays
 // visible even after the later run at the same head turns green, which
-// manufactures an unrecoverable auto-fix loop (see AGENTS.md "CI Monitor
-// Lifecycle"). This restores the semantics `gh pr checks` already applies
+// manufactures an unrecoverable auto-fix loop (see "CI Monitor Lifecycle" in
+// .agents/skills/ci-monitor/SKILL.md). This restores the semantics `gh pr checks` already applies
 // (collapse by startedAt) to the commit-rollup path, which never had it.
 //
 // Must run AFTER appendUnrepresentedWorkflowRuns, never before: that call
@@ -829,6 +877,28 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 		if state == "" {
 			state = strings.ToUpper(strings.TrimSpace(run.Status))
 		}
+		// GitHub holds a first-time contributor's workflows for maintainer
+		// approval by concluding the run ACTION_REQUIRED without running a
+		// single job. That hold is a wait on a human, not a verdict on the
+		// commit: reported as a failing check it sends the CI step's auto-fix
+		// rounds after work that never executed, and no amount of repairing
+		// the branch can clear something only a maintainer can approve.
+		//
+		// The job list is what separates the hold from a run that concluded
+		// ACTION_REQUIRED after executing jobs, which keeps its failing
+		// classification. It is read from the run itself, and only for a run
+		// already reporting ACTION_REQUIRED, so no other conclusion pays for
+		// it. The read is positive evidence, and only a PRESENT and empty job
+		// list is that evidence: a failed read, and a response carrying no job
+		// list at all, are unreadable job data and leave the run a failure
+		// rather than being guessed as a hold.
+		awaitingApproval := false
+		if bucket == scm.CheckBucketFail && state == "ACTION_REQUIRED" {
+			if jobs, present, jobsErr := h.runJobs(ctx, strconv.FormatInt(run.ID, 10)); jobsErr == nil && present && len(jobs) == 0 {
+				awaitingApproval = true
+				bucket = scm.CheckBucketPending
+			}
+		}
 		link := strings.TrimSpace(run.HTMLURL)
 		if link == "" {
 			host := strings.TrimSpace(h.host)
@@ -837,7 +907,7 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 			}
 			link = fmt.Sprintf("https://%s/%s/actions/runs/%d", host, repo, run.ID)
 		}
-		checks = append(checks, scm.Check{Name: name, Bucket: bucket, Kind: scm.CheckKindRun, State: state, CompletedAt: completedAt, StartedAt: startedAt, WorkflowID: run.WorkflowID, Link: link})
+		checks = append(checks, scm.Check{Name: name, ProviderID: fmt.Sprintf("github-workflow-run:%d", run.ID), Bucket: bucket, Kind: scm.CheckKindRun, State: state, CompletedAt: completedAt, StartedAt: startedAt, WorkflowID: run.WorkflowID, Link: link, AwaitingApproval: awaitingApproval})
 	}
 	return checks, nil
 }
@@ -976,21 +1046,42 @@ func (h *Host) PreRunFailures(ctx context.Context, checks []scm.Check) ([]bool, 
 	return result, nil
 }
 
-// fetchRunJobs reads a run's jobs (with their steps) from Actions. A run it
-// cannot read yields no jobs, so every check on it fails closed to a genuine
-// failure rather than being guessed as infrastructure.
-func (h *Host) fetchRunJobs(ctx context.Context, runID string) []githubRunJob {
+// runJobs reads a run's jobs (with their steps) from Actions, reporting both
+// why a read failed and whether the response carried a job list at all. A
+// caller that must tell "this run executed no jobs" from "this run's job data
+// is not there" reads this one: an error, an absent list, and a present empty
+// list are three different answers that all look like an empty slice.
+//
+// present is true only for a job array the response actually carried. A
+// missing "jobs" key and an explicit null both decode to a nil pointer and
+// report false, so absent job data is never mistaken for a run that ran
+// nothing.
+func (h *Host) runJobs(ctx context.Context, runID string) (jobs []githubRunJob, present bool, err error) {
 	viewArgs := append([]string{"run", "view", runID}, h.repoArgs()...)
 	viewArgs = append(viewArgs, "--json", "jobs")
 	out, err := h.cmd(ctx, "gh", viewArgs...).Output()
 	if err != nil {
-		return nil
+		return nil, false, fmt.Errorf("gh run view %s: %w", runID, err)
 	}
-	var payload githubRunView
+	var payload githubRunJobsView
 	if err := json.Unmarshal(out, &payload); err != nil {
+		return nil, false, fmt.Errorf("parse jobs for run %s: %w", runID, err)
+	}
+	if payload.Jobs == nil {
+		return nil, false, nil
+	}
+	return *payload.Jobs, true, nil
+}
+
+// fetchRunJobs reads a run's jobs (with their steps) from Actions. A run it
+// cannot read yields no jobs, so every check on it fails closed to a genuine
+// failure rather than being guessed as infrastructure.
+func (h *Host) fetchRunJobs(ctx context.Context, runID string) []githubRunJob {
+	jobs, _, err := h.runJobs(ctx, runID)
+	if err != nil {
 		return nil
 	}
-	return payload.Jobs
+	return jobs
 }
 
 // matchRunJob finds the job a check names: by databaseId when the check's link
@@ -1055,19 +1146,35 @@ func (h *Host) GetMergeableState(ctx context.Context, pr *scm.PR) (scm.Mergeable
 	return normalizeMergeableState(strings.TrimSpace(string(out))), nil
 }
 
-func (h *Host) FetchFailedCheckLogs(ctx context.Context, _ *scm.PR, branch, headSHA string, failingNames []string) (string, error) {
-	if len(failingNames) == 0 {
-		return "", nil
-	}
-	targets := make(map[string]struct{}, len(failingNames))
+func (h *Host) FetchFailedCheckLogs(ctx context.Context, pr *scm.PR, branch, headSHA string, failingNames []string) (string, error) {
+	targets := make([]scm.CheckTarget, 0, len(failingNames))
 	for _, name := range failingNames {
-		name = normalizeRunName(name)
-		if name != "" {
-			targets[name] = struct{}{}
+		targets = append(targets, scm.CheckTarget{Name: name})
+	}
+	logs, err := h.FetchFailedCheckTargetLogs(ctx, pr, branch, headSHA, targets)
+	if err != nil {
+		return "", err
+	}
+	return scm.CombineFailedCheckLogs(logs)
+}
+
+func (h *Host) FetchFailedCheckTargetLogs(ctx context.Context, _ *scm.PR, branch, headSHA string, checkTargets []scm.CheckTarget) ([]scm.FailedCheckLog, error) {
+	if len(checkTargets) == 0 {
+		return nil, nil
+	}
+	names := make(map[string]struct{}, len(checkTargets))
+	ids := make(map[string]struct{}, len(checkTargets))
+	for _, target := range checkTargets {
+		if id := strings.TrimSpace(target.ProviderID); id != "" {
+			ids[id] = struct{}{}
+			continue
+		}
+		if name := normalizeRunName(target.Name); name != "" {
+			names[name] = struct{}{}
 		}
 	}
-	if len(targets) == 0 {
-		return "", nil
+	if len(names) == 0 && len(ids) == 0 {
+		return nil, nil
 	}
 	args := []string{"run", "list", "--branch", branch}
 	if strings.TrimSpace(headSHA) != "" {
@@ -1082,29 +1189,67 @@ func (h *Host) FetchFailedCheckLogs(ctx context.Context, _ *scm.PR, branch, head
 	listCmd := h.cmd(ctx, "gh", args...)
 	listOut, err := listCmd.Output()
 	if err != nil {
-		return "", nil
+		return nil, fmt.Errorf("list GitHub runs for selected logs: %w", err)
 	}
 	var runs []githubRun
 	if err := json.Unmarshal(listOut, &runs); err != nil {
-		return "", nil
+		return nil, fmt.Errorf("parse GitHub runs for selected logs: %w", err)
 	}
+	results := make([]scm.FailedCheckLog, len(checkTargets))
+	for i, target := range checkTargets {
+		results[i].Target = target
+	}
+	matched := make(map[string]bool, len(ids))
 	for _, run := range runs {
-		if !runMatchesTargets(ctx, h, run, targets) {
-			continue
+		workflowID := fmt.Sprintf("github-workflow-run:%d", run.DatabaseID)
+		_, exactWorkflow := ids[workflowID]
+		nameMatch := runMatchesTargets(ctx, h, run, names)
+		if exactWorkflow || nameMatch {
+			viewArgs := append([]string{"run", "view", fmt.Sprintf("%d", run.DatabaseID)}, h.repoArgs()...)
+			viewArgs = append(viewArgs, "--log-failed")
+			out, fetchErr := h.cmd(ctx, "gh", viewArgs...).Output()
+			for i, target := range checkTargets {
+				matches := target.ProviderID == workflowID
+				if target.ProviderID == "" && nameMatch {
+					matches = true
+				}
+				if !matches {
+					continue
+				}
+				matched[target.Identity()] = true
+				results[i].Output = strings.TrimSpace(string(out))
+				if fetchErr != nil {
+					results[i].Err = fmt.Errorf("fetch GitHub run %d failed logs: %w", run.DatabaseID, fetchErr)
+				}
+			}
 		}
-		viewArgs := append([]string{"run", "view", fmt.Sprintf("%d", run.DatabaseID)}, h.repoArgs()...)
-		viewArgs = append(viewArgs, "--log-failed")
-		viewCmd := h.cmd(ctx, "gh", viewArgs...)
-		out, err := viewCmd.Output()
+		jobIDs, err := selectedRunJobIDs(ctx, h, run, ids)
 		if err != nil {
 			continue
 		}
-		logs := strings.TrimSpace(string(out))
-		if logs != "" {
-			return logs, nil
+		for _, jobID := range jobIDs {
+			jobProviderID := fmt.Sprintf("github-check-run:%d", jobID)
+			viewArgs := append([]string{"run", "view", fmt.Sprintf("%d", run.DatabaseID)}, h.repoArgs()...)
+			viewArgs = append(viewArgs, "--job", strconv.Itoa(jobID), "--log")
+			out, fetchErr := h.cmd(ctx, "gh", viewArgs...).Output()
+			for i, target := range checkTargets {
+				if target.ProviderID != jobProviderID {
+					continue
+				}
+				matched[target.Identity()] = true
+				results[i].Output = strings.TrimSpace(string(out))
+				if fetchErr != nil {
+					results[i].Err = fmt.Errorf("fetch GitHub job %d log: %w", jobID, fetchErr)
+				}
+			}
 		}
 	}
-	return "", nil
+	for i, target := range checkTargets {
+		if !matched[target.Identity()] {
+			results[i].Err = fmt.Errorf("selected GitHub check %q was not found", target.Identity())
+		}
+	}
+	return results, nil
 }
 
 type githubRun struct {
@@ -1117,6 +1262,14 @@ type githubRun struct {
 
 type githubRunView struct {
 	Jobs []githubRunJob `json:"jobs"`
+}
+
+// githubRunJobsView decodes the same response as githubRunView, but keeps
+// whether the "jobs" key was there. The pointer is nil for both a missing key
+// and an explicit null, and non-nil for a present array including an empty
+// one, which is the distinction runJobs reports as present.
+type githubRunJobsView struct {
+	Jobs *[]githubRunJob `json:"jobs"`
 }
 
 type githubRunJob struct {
@@ -1134,7 +1287,40 @@ type githubJobStep struct {
 	Conclusion string `json:"conclusion"`
 }
 
+func selectedRunJobIDs(ctx context.Context, h *Host, run githubRun, targets map[string]struct{}) ([]int, error) {
+	hasCheckRunTarget := false
+	for target := range targets {
+		if strings.HasPrefix(target, "github-check-run:") {
+			hasCheckRunTarget = true
+			break
+		}
+	}
+	if !hasCheckRunTarget || run.DatabaseID == 0 {
+		return nil, nil
+	}
+	viewArgs := append([]string{"run", "view", fmt.Sprintf("%d", run.DatabaseID)}, h.repoArgs()...)
+	viewArgs = append(viewArgs, "--json", "jobs")
+	out, err := h.cmd(ctx, "gh", viewArgs...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("list GitHub run %d jobs for selected logs: %w", run.DatabaseID, err)
+	}
+	var view githubRunView
+	if err := json.Unmarshal(out, &view); err != nil {
+		return nil, fmt.Errorf("parse GitHub run %d jobs for selected logs: %w", run.DatabaseID, err)
+	}
+	var ids []int
+	for _, job := range view.Jobs {
+		if _, ok := targets[fmt.Sprintf("github-check-run:%d", job.DatabaseID)]; ok {
+			ids = append(ids, job.DatabaseID)
+		}
+	}
+	return ids, nil
+}
+
 func runMatchesTargets(ctx context.Context, h *Host, run githubRun, targets map[string]struct{}) bool {
+	if len(targets) == 0 {
+		return false
+	}
 	for _, candidate := range []string{run.Name, run.DisplayTitle, run.WorkflowName} {
 		if _, ok := targets[normalizeRunName(candidate)]; ok {
 			return true
@@ -1322,7 +1508,7 @@ func (h *Host) GetReviewComments(ctx context.Context, pr *scm.PR) ([]scm.ReviewC
 				continue
 			}
 			for _, raw := range thread.Comments.Nodes {
-				if raw.Author == nil || !isSupportedReviewBot(raw.Author.Login) {
+				if raw.Author == nil || !scm.IsReviewBotLogin(raw.Author.Login) {
 					continue
 				}
 				line := 0
@@ -1349,13 +1535,4 @@ func (h *Host) GetReviewComments(ctx context.Context, pr *scm.PR) ([]scm.ReviewC
 		cursor = threads.PageInfo.EndCursor
 	}
 	return comments, nil
-}
-
-func isSupportedReviewBot(login string) bool {
-	switch strings.ToLower(strings.TrimSpace(login)) {
-	case "greptile-apps[bot]", "greptile-apps":
-		return true
-	default:
-		return false
-	}
 }

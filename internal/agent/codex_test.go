@@ -313,6 +313,47 @@ sleep 100
 	}
 }
 
+func TestCodexAgent_ProgressWithoutTerminalCompletionIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	progress := `{"findings":[],"risk_level":"low"}`
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"findings\":[],\"risk_level\":\"low\"}"}}'
+sleep 100
+	`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"findings\\\":[],\\\"risk_level\\\":\\\"low\\\"}\"}}",
+		"ping -n 101 127.0.0.1 > nul",
+	}, "\r\n"))
+
+	// The turn is ended by the streamed progress arriving, not by a wall
+	// clock: the fake emits one line and then hangs forever, so a fixed
+	// millisecond budget was really a race between process spawn and the
+	// deadline, and it lost on a loaded machine. Cancelling from the chunk
+	// callback makes the same scenario deterministic - progress streamed,
+	// never a terminal completion - at any load. The outer budget only stops
+	// the test hanging if the chunk never arrives at all.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var chunks []string
+	result, err := (&codexAgent{bin: bin}).Run(ctx, RunOpts{
+		Prompt: "review",
+		CWD:    dir,
+		OnChunk: func(text string) {
+			chunks = append(chunks, text)
+			cancel()
+		},
+	})
+	if err == nil {
+		t.Fatal("expected progress-only turn to fail without native completion")
+	}
+	if result != nil {
+		t.Fatalf("progress-only result = %+v, want nil", result)
+	}
+	if len(chunks) != 1 || chunks[0] != progress {
+		t.Fatalf("streamed progress = %q, want %q", chunks, progress)
+	}
+}
+
 func TestCodexAgent_RunIncludesJSONLErrorOnExitFailure(t *testing.T) {
 	dir := t.TempDir()
 	bin := writeFakeCodex(t, dir, `#!/bin/sh
@@ -337,6 +378,100 @@ exit 1
 	}
 	if !strings.Contains(err.Error(), "schema rejected by codex") {
 		t.Fatalf("expected JSONL error in message, got %v", err)
+	}
+}
+
+// TestCodexAgent_FailedExitCarriesCumulativeUsageMarker proves a turn that
+// reported usage and then exited non-zero still returns codex's own session
+// facts. codex counts usage cumulatively across a resumed thread, so a result
+// missing SessionUsageCumulative is recorded as a per-round delta and charges
+// every earlier round of the thread a second time.
+func TestCodexAgent_FailedExitCarriesCumulativeUsageMarker(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-1"}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":2500,"output_tokens":250,"cached_input_tokens":1800}}'
+exit 1
+`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}",
+		"echo {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":2500,\"output_tokens\":250,\"cached_input_tokens\":1800}}",
+		"exit /b 1",
+	}, "\r\n"))
+
+	ca := &codexAgent{bin: bin}
+	res, err := ca.Run(context.Background(), RunOpts{
+		Prompt:  "review",
+		CWD:     t.TempDir(),
+		Session: &SessionRef{ID: "thread-1"},
+	})
+	if err == nil {
+		t.Fatal("expected codex failure")
+	}
+	if res == nil {
+		t.Fatal("failed codex turn that reported usage must return its usage")
+	}
+	if !res.UsageReported || res.Usage.InputTokens != 2500 {
+		t.Fatalf("usage = %+v, want reported input 2500", res.Usage)
+	}
+	if !res.SessionUsageCumulative {
+		t.Fatal("failed codex turn must mark its usage cumulative")
+	}
+	if !res.Resumed {
+		t.Fatal("failed codex turn must report the resume it was asked for")
+	}
+}
+
+func TestCodexAgent_RunFillsOmittedNullableFields(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"required\":\"present\",\"nested\":{}}"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2}}'
+`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"required\\\":\\\"present\\\",\\\"nested\\\":{}}\"}}",
+		"echo {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}",
+	}, "\r\n"))
+
+	schema := json.RawMessage(`{
+		"type":"object",
+		"properties":{
+			"required":{"type":"string"},
+			"optional":{"type":"string"},
+			"nested":{
+				"type":"object",
+				"properties":{
+					"nested_optional":{"type":"boolean"}
+				},
+				"required":[]
+			}
+		},
+		"required":["required","nested"]
+	}`)
+
+	result, err := (&codexAgent{bin: bin}).Run(context.Background(), RunOpts{
+		Prompt:     "review",
+		CWD:        dir,
+		JSONSchema: schema,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(result.Output, &output); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	optional, present := output["optional"]
+	if !present || optional != nil {
+		t.Fatalf("optional field = %#v (present=%t), want explicit null", optional, present)
+	}
+	nested, ok := output["nested"].(map[string]any)
+	if !ok {
+		t.Fatalf("nested field = %#v, want object", output["nested"])
+	}
+	nestedOptional, present := nested["nested_optional"]
+	if !present || nestedOptional != nil {
+		t.Fatalf("nested optional field = %#v (present=%t), want explicit null", nestedOptional, present)
 	}
 }
 

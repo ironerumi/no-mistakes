@@ -151,6 +151,9 @@ func renderPipelineView(run *ipc.RunInfo, steps []ipc.StepResultInfo, width int,
 		icon := stepStatusIndicator(step.Status, spinnerFrame)
 		style := stepStatusStyle(step.Status)
 		label := stepLabel(step.StepName)
+		if step.WorkScope == ipc.WorkScopeDocumentLintHousekeeping {
+			label = "Document + Lint housekeeping"
+		}
 
 		line := style.Render(icon) + " " + label
 
@@ -285,6 +288,18 @@ func renderApprovalActions(showSelectionActions bool, allowFix bool, showDiff bo
 	return result
 }
 
+// singleLineReason joins the non-blank lines of durable multiline reasons so
+// the outcome banner stays on one line.
+func singleLineReason(reason string) string {
+	var parts []string
+	for _, line := range strings.Split(reason, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			parts = append(parts, line)
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
 // renderOutcomeBanner returns a styled one-line banner when the run is done.
 // Empty string when the run is still in progress.
 func renderOutcomeBanner(run *ipc.RunInfo, steps []ipc.StepResultInfo) string {
@@ -307,6 +322,11 @@ func renderOutcomeBanner(run *ipc.RunInfo, steps []ipc.StepResultInfo) string {
 
 	switch run.Status {
 	case types.RunCompleted:
+		// Keep Test exceptions and CI overrides visible together.
+		if reason := singleLineReason(run.TestOverrideReason + "\n" + run.CIOverrideReason); reason != "" {
+			style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow))
+			return style.Render("⚠ Pipeline passed with override: "+reason) + elapsed
+		}
 		style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiGreen))
 		return style.Render("✓ Pipeline passed") + elapsed
 	case types.RunFailed:

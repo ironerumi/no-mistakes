@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,11 +16,110 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestProtectedPathRefusalRetainsWorktreeButReapsProcessesAndEvidence(t *testing.T) {
+	orig := orphanProcessMinAge
+	orphanProcessMinAge = 0
+	t.Cleanup(func() { orphanProcessMinAge = orig })
+	t.Setenv("TMPDIR", t.TempDir())
+
+	for _, placement := range []string{"default", "recorded"} {
+		t.Run(placement, func(t *testing.T) {
+			p := paths.WithRoot(t.TempDir())
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			database, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			repo, head := setupTestGitRepo(t, p, database, "protected-reaping")
+			run, err := database.InsertRun(repo.ID, "main", head, head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			workDir := p.WorktreeDir(repo.ID, run.ID)
+			if placement == "recorded" {
+				workDir = filepath.Join(t.TempDir(), run.ID)
+			}
+			if err := database.SetRunWorktreeDir(run.ID, workDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), workDir, head); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			sr, err := database.InsertStepResult(run.ID, types.StepPush)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.StartStep(sr.ID); err != nil {
+				t.Fatal(err)
+			}
+			sctx := &pipeline.StepContext{Ctx: context.Background(), WorkDir: workDir, Run: run, DB: database, Config: config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{}), Log: func(string) {}}
+			_, refusal := (protectedPathCommitStep{step: &steps.PushStep{}}).Execute(sctx)
+			outcome := pipeline.ProtectedPathOutcome(refusal)
+			if outcome == nil {
+				t.Fatalf("expected protected-path refusal: %v", refusal)
+			}
+			if _, err := database.InsertStepRound(sr.ID, 1, "initial", &outcome.Findings, nil, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, outcome.ExitCode, 1, &outcome.Findings); err != nil {
+				t.Fatal(err)
+			}
+			evidenceDir := filepath.Join(p.EvidenceRoot(""), run.ID)
+			if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(evidenceDir, "output.txt"), []byte("test output"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			expired := time.Now().Add(-config.DefaultEvidenceRetention - time.Hour)
+			if err := os.Chtimes(evidenceDir, expired, expired); err != nil {
+				t.Fatal(err)
+			}
+			leakedPID := startOrphanInWorktree(t, workDir)
+			gitCmd(t, workDir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "unavailable.git"))
+			mgr := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{&steps.PushStep{}} })
+			run, err = database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := mgr.prepareRecoveredRun(context.Background(), run); err == nil || !strings.Contains(err.Error(), "disable_project_settings") {
+				t.Fatalf("recovery must fail closed at trusted config: %v", err)
+			}
+			layout, err := validatedWorktreeLayout(database, p, config.DefaultGlobalConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			recoverOnStartup(database, p, mgr, layout)
+			run, err = database.GetRun(run.ID)
+			if err != nil || run.Status != types.RunFailed || len(mgr.executors) != 0 {
+				t.Fatalf("trusted-config recovery did not fail closed: run=%+v err=%v", run, err)
+			}
+			assertProtectedWorktreePreserved(t, workDir, head)
+			if _, err := os.Stat(evidenceDir); !os.IsNotExist(err) {
+				t.Errorf("expired evidence of the terminal refused run survived: %v", err)
+			}
+			if !pidGoneWithin(leakedPID, 10*time.Second) {
+				t.Errorf("orphan %d in the terminal refused run survived the startup sweep", leakedPID)
+			}
+			_, evidenceErr := os.Stat(evidenceDir)
+			t.Logf("after failed trusted-config recovery: run=%s executors=%d orphan_alive=%t evidence_exists=%t", run.Status, len(mgr.executors), processIsAlive(leakedPID), !os.IsNotExist(evidenceErr))
+		})
+	}
+}
 
 // TestSweepOrphanRunProcessesReapsFinishedRunAndSparesActiveOne is the daemon
 // wiring for the leaked-process class: a predecessor daemon that died mid-run
@@ -68,13 +168,80 @@ func TestSweepOrphanRunProcessesReapsFinishedRunAndSparesActiveOne(t *testing.T)
 	activePID := startOrphanInWorktree(t, p.WorktreeDir(repo.ID, activeRun.ID))
 	leakedPID := startOrphanInWorktree(t, p.WorktreeDir(repo.ID, finishedRun.ID))
 
-	sweepOrphanRunProcesses(d, p, sweepableWorktrees(leftoverRecordedRunWorktrees(d, p), activeRecordedRunWorktrees(d, p)))
+	sweepOrphanRunProcesses(d, p, sweepableWorktrees(leftoverRecordedRunWorktrees(d, p), activeRecordedRunWorktrees(d, p)), nil)
 
 	if !pidGoneWithin(leakedPID, 10*time.Second) {
 		t.Fatalf("orphan %d in the finished run's worktree survived the startup sweep", leakedPID)
 	}
 	if !processIsAlive(activePID) {
 		t.Fatalf("orphan %d in an active run's worktree must not be swept", activePID)
+	}
+}
+
+// TestSweepOrphanRunProcessesSparesWorktreesRetentionIsKeeping is the
+// Greptile P1 on #1188: the startup sweep runs before reapWorktrees decides
+// what the retention policy will remove, so a terminal run alone must not be
+// treated as orphaned - a process still standing in a worktree the policy
+// is keeping (inside the retention window) must survive, while one in a
+// worktree the policy has already decided to remove is still reaped.
+func TestSweepOrphanRunProcessesSparesWorktreesRetentionIsKeeping(t *testing.T) {
+	orig := orphanProcessMinAge
+	orphanProcessMinAge = 0
+	t.Cleanup(func() { orphanProcessMinAge = orig })
+
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	repo, err := d.InsertRepoWithID("repo1", "/nonexistent/work", "https://example.com/owner/repo1", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	retainedRun, err := d.InsertRun(repo.ID, "retained-branch", "headsha1", "basesha1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(retainedRun.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	expiredRun, err := d.InsertRun(repo.ID, "expired-branch", "headsha2", "basesha2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(expiredRun.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+
+	retainedDir := p.WorktreeDir(repo.ID, retainedRun.ID)
+	expiredDir := p.WorktreeDir(repo.ID, expiredRun.ID)
+	retainedPID := startOrphanInWorktree(t, retainedDir)
+	expiredPID := startOrphanInWorktree(t, expiredDir)
+
+	fresh := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(retainedDir, fresh, fresh); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(expiredDir, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	policy := worktreeReapPolicy{Retention: 14 * 24 * time.Hour}
+	retained := retainedDefaultTreeRunIDs(d, p, policy, time.Now())
+	sweepOrphanRunProcesses(d, p, nil, retained)
+
+	if !processIsAlive(retainedPID) {
+		t.Fatalf("orphan %d in a worktree the retention policy is keeping was swept", retainedPID)
+	}
+	if !pidGoneWithin(expiredPID, 10*time.Second) {
+		t.Fatalf("orphan %d in a worktree past the retention window survived the startup sweep", expiredPID)
 	}
 }
 
@@ -137,7 +304,7 @@ func TestSweepOrphanRunProcessesReachesRecordedWorktreeAndSparesUnclaimedOnes(t 
 	operatorPID := startOrphanInWorktree(t, filepath.Join(abandonedRoot, "scratch-checkout"))
 	unclaimedPID := startOrphanInWorktree(t, filepath.Join(abandonedRoot, "01JZ8XQ7V6K9M3B0T5N2R4C8YD"))
 
-	sweepOrphanRunProcesses(d, p, sweepableWorktrees(leftoverRecordedRunWorktrees(d, p), activeRecordedRunWorktrees(d, p)))
+	sweepOrphanRunProcesses(d, p, sweepableWorktrees(leftoverRecordedRunWorktrees(d, p), activeRecordedRunWorktrees(d, p)), nil)
 
 	if !pidGoneWithin(leakedPID, 10*time.Second) {
 		t.Fatalf("orphan %d in a recorded worktree the config no longer names survived the startup sweep", leakedPID)

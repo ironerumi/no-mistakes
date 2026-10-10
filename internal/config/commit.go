@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"strings"
 	"text/template"
 	"text/template/parse"
@@ -22,32 +23,72 @@ const (
 	maxFixMessageTemplateBytes = 1024
 	maxFixMessagePlaceholders  = 16
 	maxFixMessageSubjectBytes  = 4096
+	maxBranchPatternBytes      = 1024
+	maxTrailers                = 16
+	maxTrailerBytes            = 1024
+	maxTrailerValueBytes       = 64
 )
+
+// unknownTrailerValue stands in for an agent or model the invocation did not
+// report, so a trailer still says which commits lack that evidence instead of
+// silently disappearing.
+const unknownTrailerValue = "unknown"
 
 // MaxFixMessageSummaryBytes bounds agent-provided fix summaries before rendering.
 const MaxFixMessageSummaryBytes = 4096
 
 // CommitRaw is the YAML representation of auto-fix commit settings.
 type CommitRaw struct {
-	FixMessage *string `yaml:"fix_message"`
+	FixMessage    *string   `yaml:"fix_message"`
+	BranchPattern *string   `yaml:"branch_pattern"`
+	Trailers      *[]string `yaml:"trailers"`
+}
+
+type GlobalCommitRaw struct {
+	CommitRaw         `yaml:",inline"`
+	BranchReplacement *string `yaml:"branch_replacement"`
 }
 
 // Commit is the resolved auto-fix commit configuration.
 type Commit struct {
-	FixMessage string
+	FixMessage        string
+	BranchPattern     string
+	BranchReplacement string
+	Trailers          []string
+}
+
+// TrailerData identifies the agent invocation that produced a commit's changes.
+type TrailerData struct {
+	Agent string
+	Model string
 }
 
 type fixMessageData struct {
 	Step    types.StepName
 	Summary string
+	Branch  string
 }
 
 func validateCommitRaw(raw CommitRaw) error {
+	if raw.BranchPattern != nil {
+		if _, err := compileBranchPattern(*raw.BranchPattern); err != nil {
+			return err
+		}
+	}
+	if raw.Trailers != nil {
+		if err := validateTrailers(*raw.Trailers); err != nil {
+			return err
+		}
+	}
 	if raw.FixMessage == nil {
 		return nil
 	}
 	if strings.TrimSpace(*raw.FixMessage) == "" {
 		return fmt.Errorf("commit.fix_message must not be empty")
+	}
+	commit := Commit{FixMessage: *raw.FixMessage}
+	if raw.BranchPattern != nil {
+		commit.BranchPattern = *raw.BranchPattern
 	}
 	for _, step := range []types.StepName{
 		types.StepReview,
@@ -55,15 +96,86 @@ func validateCommitRaw(raw CommitRaw) error {
 		types.StepDocument,
 		types.StepLint,
 	} {
-		if _, err := (Commit{FixMessage: *raw.FixMessage}).RenderFixMessage(step, "apply fixes"); err != nil {
+		if _, err := commit.renderFixMessage(step, "apply fixes", "branch", false); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func validateGlobalCommitRaw(raw GlobalCommitRaw) error {
+	if err := validateCommitRaw(raw.CommitRaw); err != nil {
+		return err
+	}
+	if raw.BranchReplacement == nil {
+		return nil
+	}
+	if raw.CommitRaw.BranchPattern == nil {
+		return fmt.Errorf("commit.branch_replacement requires commit.branch_pattern")
+	}
+	return validateBranchReplacement(*raw.BranchReplacement)
+}
+
+func compileBranchPattern(pattern string) (*regexp.Regexp, error) {
+	if strings.TrimSpace(pattern) == "" {
+		return nil, fmt.Errorf("commit.branch_pattern must not be empty")
+	}
+	if len(pattern) > maxBranchPatternBytes {
+		return nil, fmt.Errorf("commit.branch_pattern must not exceed %d bytes", maxBranchPatternBytes)
+	}
+	if !utf8.ValidString(pattern) {
+		return nil, fmt.Errorf("commit.branch_pattern must contain valid UTF-8")
+	}
+	if containsUnsafeFixMessageRune(pattern) {
+		return nil, fmt.Errorf("commit.branch_pattern must not contain control or unsafe Unicode format characters or line separators")
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("parse commit.branch_pattern: %w", err)
+	}
+	if re.NumSubexp() != 1 {
+		return nil, fmt.Errorf("commit.branch_pattern must contain exactly one capture group")
+	}
+	return re, nil
+}
+
+func validateBranchReplacement(replacement string) error {
+	if strings.TrimSpace(replacement) == "" {
+		return fmt.Errorf("commit.branch_replacement must not be empty")
+	}
+	if len(replacement) > maxBranchPatternBytes {
+		return fmt.Errorf("commit.branch_replacement must not exceed %d bytes", maxBranchPatternBytes)
+	}
+	if !utf8.ValidString(replacement) {
+		return fmt.Errorf("commit.branch_replacement must contain valid UTF-8")
+	}
+	if containsUnsafeFixMessageRune(replacement) {
+		return fmt.Errorf("commit.branch_replacement must not contain control or unsafe Unicode format characters or line separators")
+	}
+	const capture = "${1}"
+	if strings.Count(replacement, capture) != 1 || strings.Contains(strings.Replace(replacement, capture, "", 1), "$") {
+		return invalidBranchReplacement()
+	}
+	return nil
+}
+
+func invalidBranchReplacement() error {
+	return fmt.Errorf("commit.branch_replacement must contain exactly one ${1} capture reference and no other dollar signs")
+}
+
 // RenderFixMessage renders and validates a single-line auto-fix commit subject.
+// It preserves the legacy call shape for callers that do not have a branch.
 func (c Commit) RenderFixMessage(step types.StepName, summary string) (string, error) {
+	return c.renderFixMessage(step, summary, "", true)
+}
+
+// RenderFixMessageForBranch renders an auto-fix commit subject with the branch
+// value available to the {{.Branch}} placeholder.
+func (c Commit) RenderFixMessageForBranch(step types.StepName, summary, branch string) (string, error) {
+	return c.renderFixMessage(step, summary, branch, true)
+}
+
+func (c Commit) renderFixMessage(step types.StepName, summary, branch string, resolveBranch bool) (string, error) {
 	source := c.FixMessage
 	if source == "" {
 		source = DefaultFixMessageTemplate
@@ -94,7 +206,15 @@ func (c Commit) RenderFixMessage(step types.StepName, summary string) (string, e
 	if err := validateFixMessageTemplate(tmpl); err != nil {
 		return "", err
 	}
-	data := fixMessageData{Step: step, Summary: summary}
+	if fixMessageTemplateUses(tmpl, "Branch") {
+		if resolveBranch {
+			branch, err = c.BranchValue(branch)
+			if err != nil {
+				return "", err
+			}
+		}
+	}
+	data := fixMessageData{Step: step, Summary: summary, Branch: branch}
 	predictedBytes, err := predictFixMessageBytes(tmpl, data)
 	if err != nil {
 		return "", err
@@ -119,6 +239,169 @@ func (c Commit) RenderFixMessage(step types.StepName, summary string) (string, e
 		return "", fmt.Errorf("commit.fix_message must render to a non-empty message")
 	}
 	return message, nil
+}
+
+// BranchValue returns the branch value exposed to commit and PR title
+// templates. BranchPattern, when configured, must capture the identifier in
+// its only capture group. BranchReplacement can add literal text around it.
+func (c Commit) BranchValue(branch string) (string, error) {
+	branch = strings.TrimSpace(strings.TrimPrefix(branch, "refs/heads/"))
+	if c.BranchPattern == "" {
+		if branch == "" {
+			return "", fmt.Errorf("commit template requires a non-empty branch")
+		}
+		return branch, nil
+	}
+	re, err := compileBranchPattern(c.BranchPattern)
+	if err != nil {
+		return "", err
+	}
+	match := re.FindStringSubmatch(branch)
+	if len(match) < 2 || strings.TrimSpace(match[1]) == "" {
+		return "", fmt.Errorf("commit.branch_pattern did not find an identifier in branch %q", branch)
+	}
+	value := match[1]
+	if c.BranchReplacement != "" {
+		if err := validateBranchReplacement(c.BranchReplacement); err != nil {
+			return "", err
+		}
+		value = strings.Replace(c.BranchReplacement, "${1}", value, 1)
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("commit.branch_pattern did not produce a non-empty identifier for branch %q", branch)
+	}
+	if !utf8.ValidString(value) || containsUnsafeFixMessageRune(value) {
+		return "", fmt.Errorf("commit.branch_pattern captured an invalid branch identifier")
+	}
+	return value, nil
+}
+
+func validateTrailers(trailers []string) error {
+	if len(trailers) > maxTrailers {
+		return fmt.Errorf("commit.trailers must not contain more than %d entries", maxTrailers)
+	}
+	commit := Commit{Trailers: trailers}
+	_, err := commit.RenderTrailers(TrailerData{Agent: worstCaseTrailerValue, Model: worstCaseTrailerValue})
+	return err
+}
+
+// worstCaseTrailerValue is the longest value trailerValue can return, carrying
+// every punctuation byte it lets through, so an entry that renders with it at
+// config load cannot overflow or lose its trailer shape with a real agent or
+// model at commit time.
+var worstCaseTrailerValue = "-_.:/" + strings.Repeat("a", maxTrailerValueBytes-len("-_.:/"))
+
+// gitTrailerLine is the "Key: value" shape git interpret-trailers recognises,
+// so a rendered line is parsed as a trailer rather than as body text.
+var gitTrailerLine = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*: \S`)
+
+// literalTrailerKey is the "Key: " prefix an entry must spell out before its
+// first placeholder, so an agent-reported value can only ever land in the value.
+var literalTrailerKey = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*: `)
+
+// RenderTrailers renders commit.trailers for the agent invocation that produced
+// a commit. Agent and model are reduced to a single safe token first because
+// they come from agent output, not from configuration.
+func (c Commit) RenderTrailers(data TrailerData) ([]string, error) {
+	if len(c.Trailers) > maxTrailers {
+		return nil, fmt.Errorf("commit.trailers must not contain more than %d entries", maxTrailers)
+	}
+	data.Agent = trailerValue(data.Agent)
+	data.Model = trailerValue(data.Model)
+	rendered := make([]string, 0, len(c.Trailers))
+	for i, source := range c.Trailers {
+		line, err := renderTrailer(source, data)
+		if err != nil {
+			return nil, fmt.Errorf("commit.trailers[%d]: %w", i, err)
+		}
+		rendered = append(rendered, line)
+	}
+	return rendered, nil
+}
+
+func renderTrailer(source string, data TrailerData) (string, error) {
+	if len(source) > maxTrailerBytes {
+		return "", fmt.Errorf("must not exceed %d bytes", maxTrailerBytes)
+	}
+	if !utf8.ValidString(source) {
+		return "", fmt.Errorf("must contain valid UTF-8")
+	}
+	if containsUnsafeFixMessageRune(source) {
+		return "", fmt.Errorf("must not contain control or unsafe Unicode format characters or line separators")
+	}
+	tmpl, err := template.New("commit.trailers").Option("missingkey=error").Parse(source)
+	if err != nil {
+		return "", fmt.Errorf("parse template: %w", err)
+	}
+	if err := validateTrailerTemplate(tmpl); err != nil {
+		return "", err
+	}
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, data); err != nil {
+		return "", fmt.Errorf("render template: %w", err)
+	}
+	line := strings.TrimSpace(out.String())
+	if len(line) > maxTrailerBytes {
+		return "", fmt.Errorf("must not render to more than %d bytes", maxTrailerBytes)
+	}
+	if !gitTrailerLine.MatchString(line) {
+		return "", fmt.Errorf("must render to a git trailer of the form \"Key: value\"")
+	}
+	return line, nil
+}
+
+func validateTrailerTemplate(tmpl *template.Template) error {
+	const unsupported = "supports only literal text and {{.Agent}} or {{.Model}} placeholders"
+	if len(tmpl.Templates()) != 1 || tmpl.Tree == nil || tmpl.Tree.Root == nil {
+		return fmt.Errorf(unsupported)
+	}
+	placeholders := 0
+	for _, node := range tmpl.Tree.Root.Nodes {
+		switch node := node.(type) {
+		case *parse.TextNode:
+		case *parse.ActionNode:
+			name, ok := templateFieldName(node.Pipe)
+			if !ok || (name != "Agent" && name != "Model") {
+				return fmt.Errorf(unsupported)
+			}
+			placeholders++
+			if placeholders > maxFixMessagePlaceholders {
+				return fmt.Errorf("must not contain more than %d placeholders", maxFixMessagePlaceholders)
+			}
+		default:
+			return fmt.Errorf(unsupported)
+		}
+	}
+	if placeholders > 0 {
+		key, _ := tmpl.Tree.Root.Nodes[0].(*parse.TextNode)
+		if key == nil || !literalTrailerKey.Match(bytes.TrimLeftFunc(key.Text, unicode.IsSpace)) {
+			return fmt.Errorf("must start with a literal \"Key: \" before any placeholder; {{.Agent}} and {{.Model}} are allowed only in the value")
+		}
+	}
+	return nil
+}
+
+func trailerValue(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexFunc(s, unicode.IsSpace); i >= 0 {
+		s = s[:i]
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if b.Len() >= maxTrailerValueBytes {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.', r == ':', r == '/':
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return unknownTrailerValue
+	}
+	return b.String()
 }
 
 func containsUnsafeFixMessageRune(message string) bool {
@@ -150,7 +433,7 @@ func isUnsafeInvisibleFixMessageRune(r rune) bool {
 
 func validateFixMessageTemplate(tmpl *template.Template) error {
 	if len(tmpl.Templates()) != 1 || tmpl.Tree == nil || tmpl.Tree.Root == nil {
-		return fmt.Errorf("commit.fix_message supports only literal text and {{.Step}} or {{.Summary}} placeholders")
+		return fmt.Errorf("commit.fix_message supports only literal text and {{.Step}}, {{.Summary}}, or {{.Branch}} placeholders")
 	}
 	placeholders := 0
 	for _, node := range tmpl.Tree.Root.Nodes {
@@ -158,14 +441,14 @@ func validateFixMessageTemplate(tmpl *template.Template) error {
 		case *parse.TextNode:
 		case *parse.ActionNode:
 			if !isFixMessagePlaceholder(node.Pipe) {
-				return fmt.Errorf("commit.fix_message supports only literal text and {{.Step}} or {{.Summary}} placeholders")
+				return fmt.Errorf("commit.fix_message supports only literal text and {{.Step}}, {{.Summary}}, or {{.Branch}} placeholders")
 			}
 			placeholders++
 			if placeholders > maxFixMessagePlaceholders {
 				return fmt.Errorf("commit.fix_message must not contain more than %d placeholders", maxFixMessagePlaceholders)
 			}
 		default:
-			return fmt.Errorf("commit.fix_message supports only literal text and {{.Step}} or {{.Summary}} placeholders")
+			return fmt.Errorf("commit.fix_message supports only literal text and {{.Step}}, {{.Summary}}, or {{.Branch}} placeholders")
 		}
 	}
 	return nil
@@ -181,15 +464,18 @@ func predictFixMessageBytes(tmpl *template.Template, data fixMessageData) (int, 
 		case *parse.ActionNode:
 			name, ok := fixMessagePlaceholderName(node.Pipe)
 			if !ok {
-				return 0, fmt.Errorf("commit.fix_message supports only literal text and {{.Step}} or {{.Summary}} placeholders")
+				return 0, fmt.Errorf("commit.fix_message supports only literal text and {{.Step}}, {{.Summary}}, or {{.Branch}} placeholders")
 			}
-			if name == "Step" {
+			switch name {
+			case "Step":
 				nodeBytes = len(data.Step)
-			} else {
+			case "Summary":
 				nodeBytes = len(data.Summary)
+			case "Branch":
+				nodeBytes = len(data.Branch)
 			}
 		default:
-			return 0, fmt.Errorf("commit.fix_message supports only literal text and {{.Step}} or {{.Summary}} placeholders")
+			return 0, fmt.Errorf("commit.fix_message supports only literal text and {{.Step}}, {{.Summary}}, or {{.Branch}} placeholders")
 		}
 		if nodeBytes > maxFixMessageSubjectBytes-size {
 			return 0, fmt.Errorf("commit.fix_message must not render to more than %d bytes", maxFixMessageSubjectBytes)
@@ -205,6 +491,13 @@ func isFixMessagePlaceholder(pipe *parse.PipeNode) bool {
 }
 
 func fixMessagePlaceholderName(pipe *parse.PipeNode) (string, bool) {
+	name, ok := templateFieldName(pipe)
+	return name, ok && (name == "Step" || name == "Summary" || name == "Branch")
+}
+
+// templateFieldName reports the field of a bare {{.Field}} action and rejects
+// every other action shape: pipelines, functions, and assignments.
+func templateFieldName(pipe *parse.PipeNode) (string, bool) {
 	if pipe == nil || pipe.IsAssign || len(pipe.Decl) != 0 || len(pipe.Cmds) != 1 {
 		return "", false
 	}
@@ -216,6 +509,16 @@ func fixMessagePlaceholderName(pipe *parse.PipeNode) (string, bool) {
 	if !ok || len(field.Ident) != 1 {
 		return "", false
 	}
-	name := field.Ident[0]
-	return name, name == "Step" || name == "Summary"
+	return field.Ident[0], true
+}
+
+func fixMessageTemplateUses(tmpl *template.Template, name string) bool {
+	for _, node := range tmpl.Tree.Root.Nodes {
+		if action, ok := node.(*parse.ActionNode); ok {
+			if placeholder, ok := fixMessagePlaceholderName(action.Pipe); ok && placeholder == name {
+				return true
+			}
+		}
+	}
+	return false
 }
