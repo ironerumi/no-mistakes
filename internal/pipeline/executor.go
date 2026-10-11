@@ -721,6 +721,103 @@ func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
 	return err
 }
 
+// CIMonitorRecoverable reports whether a run that was not parked when the
+// daemon stopped was monitoring CI on a pushed PR, judged from durable records
+// alone: its CI step is the only step in flight, and a PR and a pushed head
+// are recorded. It is the cheap test startup recovery runs before building the
+// run's configuration, so a run in any other executing step costs nothing and
+// keeps the crash recovery it always had.
+func CIMonitorRecoverable(database *db.DB, run *db.Run) bool {
+	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince != nil || run.Branch == "" {
+		return false
+	}
+	if run.PRURL == nil || *run.PRURL == "" || run.LastPushedSHA == nil || *run.LastPushedSHA == "" {
+		return false
+	}
+	results, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		return false
+	}
+	ciRunning := false
+	for _, result := range results {
+		switch result.Status {
+		case types.StepStatusRunning:
+			if result.StepName != types.StepCI {
+				return false
+			}
+			ciRunning = true
+		case types.StepStatusFixing, types.StepStatusAwaitingApproval, types.StepStatusFixReview:
+			return false
+		}
+	}
+	return ciRunning
+}
+
+// recoveredCIMonitor returns the index of the CI step of a run recovered while
+// monitoring CI, after checking that the recorded steps are the sequence the
+// run executed: everything before CI finished, CI running, the rest untouched.
+func (e *Executor) recoveredCIMonitor(run *db.Run) (int, error) {
+	if !CIMonitorRecoverable(e.db, run) {
+		return 0, fmt.Errorf("run is not a recoverable CI monitor")
+	}
+	results, err := e.db.GetStepsByRun(run.ID)
+	if err != nil {
+		return 0, fmt.Errorf("get recovered steps: %w", err)
+	}
+	if len(results) != len(e.steps) {
+		return 0, fmt.Errorf("recovered run has %d step records for %d steps", len(results), len(e.steps))
+	}
+	ciIndex := -1
+	for index, result := range results {
+		if result.StepName != e.steps[index].Name() {
+			return 0, fmt.Errorf("recovered step %d is %q, want %q", index, result.StepName, e.steps[index].Name())
+		}
+		switch {
+		case result.Status == types.StepStatusRunning:
+			ciIndex = index
+		case ciIndex < 0 && result.Status != types.StepStatusCompleted && result.Status != types.StepStatusSkipped:
+			return 0, fmt.Errorf("recovered step %s is %s before the CI monitor", result.StepName, result.Status)
+		case ciIndex >= 0 && result.Status != types.StepStatusPending:
+			return 0, fmt.Errorf("recovered step %s is %s after the CI monitor", result.StepName, result.Status)
+		}
+	}
+	return ciIndex, nil
+}
+
+// ValidateRecoveredCIMonitor is ValidateRecoveredRun for a run that was
+// monitoring CI rather than parked at a gate.
+func ValidateRecoveredCIMonitor(database *db.DB, run *db.Run, steps []Step) error {
+	_, err := (&Executor{db: database, steps: steps}).recoveredCIMonitor(run)
+	return err
+}
+
+// ResumeCIMonitor restarts the CI step of a run whose daemon stopped while it
+// was monitoring an open PR. The CI step is re-entered through the same path a
+// fresh run takes: it reads the PR, the rerun budget and the rounds already
+// spent from durable state, so nothing here is a second monitor.
+func (e *Executor) ResumeCIMonitor(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
+	e.workDir = workDir
+	ctx = e.runContext(ctx)
+	if repo == nil {
+		return fmt.Errorf("recovered run has no repository")
+	}
+	ciIndex, err := e.recoveredCIMonitor(run)
+	if err != nil {
+		return err
+	}
+	logDir := e.paths.RunLogDir(run.ID)
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
+	}
+	if err := recordCommandConfiguration(logDir, "resume", e.config); err != nil {
+		return e.failRun(run, repo, err)
+	}
+	e.initializeRunScopes(run.ID)
+	// revalidating admits the CI step's running status; the step is started
+	// again by executeStep like any other.
+	return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, ciIndex, true)
+}
+
 // Resume restores a run that was durably parked at an approval gate when the
 // daemon stopped. It only accepts a fully recorded gate and otherwise returns
 // an error so startup recovery can fail the run rather than guessing.

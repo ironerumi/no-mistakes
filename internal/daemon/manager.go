@@ -119,6 +119,9 @@ type recoveredRunPlan struct {
 	agent   agent.Agent
 	steps   []pipeline.Step
 	forge   *forgecontext.Context
+	// ciMonitor marks a run that was monitoring CI when the daemon stopped,
+	// rather than parked at a gate: it resumes at its CI step.
+	ciMonitor bool
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {
@@ -133,6 +136,11 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 		branchCounts[run.RepoID+"\x00"+run.Branch]++
 	}
 	for _, run := range runs {
+		// Only parked runs and CI monitors on an open PR survive a restart;
+		// a run in any other executing step is left to crash recovery.
+		if run.AwaitingAgentSince == nil && !pipeline.CIMonitorRecoverable(m.db, run) {
+			continue
+		}
 		if branchCounts[run.RepoID+"\x00"+run.Branch] != 1 {
 			slog.Warn("active run cannot be safely resumed", "run_id", run.ID, "error", "conflicting active run for branch")
 			continue
@@ -148,8 +156,12 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 }
 
 func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*recoveredRunPlan, error) {
-	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil || run.Branch == "" {
-		return nil, fmt.Errorf("run is not a parked running run")
+	if run == nil || run.Status != types.RunRunning || run.Branch == "" {
+		return nil, fmt.Errorf("run is not a running run")
+	}
+	ciMonitor := run.AwaitingAgentSince == nil
+	if ciMonitor && !pipeline.CIMonitorRecoverable(m.db, run) {
+		return nil, fmt.Errorf("run is neither parked nor monitoring CI")
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil {
@@ -180,7 +192,11 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		return nil, err
 	}
 	execSteps := steps.WithCustomGates(m.steps(), cfg.Gates)
-	if err := pipeline.ValidateRecoveredRun(m.db, run, execSteps); err != nil {
+	validate := pipeline.ValidateRecoveredRun
+	if ciMonitor {
+		validate = pipeline.ValidateRecoveredCIMonitor
+	}
+	if err := validate(m.db, run, execSteps); err != nil {
 		return nil, err
 	}
 	forgeCtx, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
@@ -220,6 +236,8 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		agent:   ag,
 		steps:   execSteps,
 		forge:   forgeCtx,
+
+		ciMonitor: ciMonitor,
 	}, nil
 }
 
@@ -518,7 +536,11 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 				m.pumpQueue()
 			}()
 
-			if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); errors.Is(err, pipeline.ErrParkedAtShutdown) {
+			resume := executor.Resume
+			if plan.ciMonitor {
+				resume = executor.ResumeCIMonitor
+			}
+			if err := resume(runCtx, plan.run, plan.repo, plan.workDir); errors.Is(err, pipeline.ErrParkedAtShutdown) {
 				parkedAtShutdown = true
 				slog.Info("recovered run left parked for resume after daemon restart", "run_id", plan.run.ID)
 				return
