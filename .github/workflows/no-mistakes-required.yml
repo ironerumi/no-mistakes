@@ -51,6 +51,7 @@ jobs:
     # skipped job is also what every ruleset in the fleet already sees for these
     # authors, so keeping the condition here preserves the exact verdict shape.
     if: >-
+      github.repository == 'kunchenguid/no-mistakes' &&
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.event.pull_request.user.login != 'release-please[bot]'
