@@ -105,6 +105,32 @@ func TestClassifyTransient_Positive(t *testing.T) {
 	}
 }
 
+func TestRunWithRetry_RetriesPiTransientStrings(t *testing.T) {
+	for _, msg := range []string{
+		"pi did not finish by calling no_mistakes_output alone",
+		"pi exited: fetch failed",
+		"Unable to verify model access",
+	} {
+		t.Run(msg, func(t *testing.T) {
+			defer withFastBackoff(t)()
+			calls := 0
+			res, err := runWithRetry(context.Background(), "pi", RunOpts{}, 2, classifyTransient, nil, func() (*Result, error) {
+				calls++
+				if calls == 1 {
+					return nil, errors.New(msg)
+				}
+				return &Result{}, nil
+			})
+			if err != nil || res == nil {
+				t.Fatalf("expected success after retry, got res=%v err=%v", res, err)
+			}
+			if calls != 2 {
+				t.Errorf("calls = %d, want 2", calls)
+			}
+		})
+	}
+}
+
 func TestClassifyTransient_Negative(t *testing.T) {
 	cases := []struct {
 		name   string
