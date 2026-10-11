@@ -20,11 +20,15 @@ import (
 type ciMonitorStep struct {
 	entered atomic.Int32
 	db      *db.DB
+	skip    bool
 }
 
 func (s *ciMonitorStep) Name() types.StepName { return types.StepCI }
 func (s *ciMonitorStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	s.entered.Add(1)
+	if s.skip {
+		return &pipeline.StepOutcome{Skipped: true, SkipReason: "provider unavailable"}, nil
+	}
 	if s.db != nil {
 		stored, err := s.db.GetRun(sctx.Run.ID)
 		if err != nil {
@@ -128,6 +132,34 @@ func TestRecoverOnStartup_ResumesCIMonitorOnOpenPR(t *testing.T) {
 		if step.Status != types.StepStatusCompleted {
 			t.Errorf("step %s = %s, want completed", step.StepName, step.Status)
 		}
+	}
+}
+
+func TestRecoverOnStartup_UnvalidatedCIMonitorIsInterrupted(t *testing.T) {
+	p, d := openRestartDB(t)
+	run := seedRestartedRun(t, p, d, "interrupt-ci-monitor", types.StepCI)
+	ci := &ciMonitorStep{skip: true}
+
+	runTestDaemon(t, p, d, func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}, ci}
+	}, 15*time.Second)
+
+	recovered := waitForRunTerminalState(t, d, run.ID)
+	if recovered.Status != types.RunCIMonitorInterrupted {
+		t.Fatalf("run status = %s, want %s", recovered.Status, types.RunCIMonitorInterrupted)
+	}
+	if recovered.Error == nil || *recovered.Error != types.RunCIMonitorInterruptedReason {
+		t.Fatalf("run error = %v, want %q", recovered.Error, types.RunCIMonitorInterruptedReason)
+	}
+	steps, err := d.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps[1].Status != types.StepStatusSkipped {
+		t.Fatalf("CI step status = %s, want %s", steps[1].Status, types.StepStatusSkipped)
+	}
+	if steps[1].SkipReason == nil || *steps[1].SkipReason != types.RunCIMonitorInterruptedReason {
+		t.Fatalf("CI skip reason = %v, want %q", steps[1].SkipReason, types.RunCIMonitorInterruptedReason)
 	}
 }
 

@@ -824,7 +824,7 @@ func (e *Executor) ResumeCIMonitor(ctx context.Context, run *db.Run, repo *db.Re
 	e.initializeRunScopes(run.ID)
 	// revalidating admits the CI step's running status; the step is started
 	// again by executeStep like any other.
-	return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, ciIndex, true)
+	return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, ciIndex, true, true)
 }
 
 // Resume restores a run that was durably parked at an approval gate when the
@@ -878,7 +878,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			return e.failRun(run, repo, fmt.Errorf("complete reconciled step %s: %w", gate.step.Name(), err), ctx)
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", &duration)
-		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false, false)
 	}
 	reconcileCtx := &StepContext{
 		Ctx:          ctx,
@@ -997,17 +997,17 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 				if err != nil {
 					return e.failRun(run, repo, fmt.Errorf("restart recovered run from %s: %w", types.StepTest, err), ctx)
 				}
-				return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, true)
+				return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, true, false)
 			}
 		}
-		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false, false)
 	case types.ActionSkip:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusSkipped, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err), ctx)
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusSkipped), "", "", &duration)
-		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false, false)
 	case types.ActionAbort:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		abortError := types.UserAbortStepError(response.approvalReason)
@@ -1100,9 +1100,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			if indexErr != nil {
 				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", gate.step.Name(), restartFrom), ctx)
 			}
-			return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, true)
+			return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, true, false)
 		}
-		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false, false)
 	default:
 		return e.failRun(run, repo, fmt.Errorf("step %s: unsupported approval action %q", gate.step.Name(), response.action), ctx)
 	}
@@ -1183,7 +1183,35 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 	return gate, nil
 }
 
-func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, repo *db.Repo, workDir, logDir string, start int, revalidating bool) error {
+func (e *Executor) interruptRecoveredCIMonitor(run *db.Run, repo *db.Repo, result *db.StepResult) error {
+	const reason = types.RunCIMonitorInterruptedReason
+	exitCode := 0
+	if result.ExitCode != nil {
+		exitCode = *result.ExitCode
+	}
+	duration := int64(0)
+	if result.DurationMS != nil {
+		duration = *result.DurationMS
+	}
+	logPath := ""
+	if result.LogPath != nil {
+		logPath = *result.LogPath
+	}
+	if err := e.db.CompleteSkippedStep(result.ID, exitCode, duration, logPath, reason); err != nil {
+		return e.failRun(run, repo, fmt.Errorf("preserve interrupted CI step: %w", err))
+	}
+	if err := e.db.UpdateRunErrorStatus(run.ID, reason, types.RunCIMonitorInterrupted); err != nil {
+		return e.failRun(run, repo, fmt.Errorf("preserve interrupted CI monitor: %w", err))
+	}
+	run.Status = types.RunCIMonitorInterrupted
+	errMsg := reason
+	run.Error = &errMsg
+	e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, types.StepCI, string(types.StepStatusSkipped), "", "", &duration)
+	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
+	return nil
+}
+
+func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, repo *db.Repo, workDir, logDir string, start int, revalidating, interruptedCIMonitor bool) error {
 	results, err := e.db.GetStepsByRun(run.ID)
 	if err != nil {
 		return e.failRun(run, repo, fmt.Errorf("get recovered steps: %w", err), ctx)
@@ -1212,6 +1240,15 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 		skipRemaining, restartFrom, err := e.executeStep(ctx, e.steps[index], results[index], run, repo, workDir, logDir, state)
 		if err != nil {
 			return e.failRun(run, repo, err, ctx)
+		}
+		if interruptedCIMonitor && e.steps[index].Name() == types.StepCI {
+			result, resultErr := e.db.GetStepResult(results[index].ID)
+			if resultErr != nil {
+				return e.failRun(run, repo, fmt.Errorf("get recovered CI step: %w", resultErr), ctx)
+			}
+			if result != nil && result.Status == types.StepStatusSkipped {
+				return e.interruptRecoveredCIMonitor(run, repo, result)
+			}
 		}
 		if skipRemaining {
 			return e.skipRecoveredRemainder(run, repo, index+1)
