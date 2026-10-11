@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync/atomic"
 	"testing"
@@ -18,11 +19,21 @@ import (
 // entered and finishes the step so the recovered run can complete.
 type ciMonitorStep struct {
 	entered atomic.Int32
+	db      *db.DB
 }
 
 func (s *ciMonitorStep) Name() types.StepName { return types.StepCI }
-func (s *ciMonitorStep) Execute(_ *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+func (s *ciMonitorStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	s.entered.Add(1)
+	if s.db != nil {
+		stored, err := s.db.GetRun(sctx.Run.ID)
+		if err != nil {
+			return nil, err
+		}
+		if stored.CIReadyAt != nil || stored.CIReadyNoCI || sctx.Run.CIReadyAt != nil || sctx.Run.CIReadyNoCI {
+			return nil, fmt.Errorf("recovered CI readiness was not cleared")
+		}
+	}
 	return &pipeline.StepOutcome{}, nil
 }
 
@@ -93,7 +104,10 @@ func openRestartDB(t *testing.T) (*paths.Paths, *db.DB) {
 func TestRecoverOnStartup_ResumesCIMonitorOnOpenPR(t *testing.T) {
 	p, d := openRestartDB(t)
 	run := seedRestartedRun(t, p, d, "resume-ci-monitor", types.StepCI)
-	ci := &ciMonitorStep{}
+	if err := d.SetRunCIReadyWithReason(run.ID, true, true); err != nil {
+		t.Fatal(err)
+	}
+	ci := &ciMonitorStep{db: d}
 
 	runTestDaemon(t, p, d, func() []pipeline.Step {
 		return []pipeline.Step{&mockPassStep{name: types.StepReview}, ci}

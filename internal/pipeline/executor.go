@@ -698,6 +698,15 @@ func (e *Executor) ResumeCIMonitor(ctx context.Context, run *db.Run, repo *db.Re
 	if err != nil {
 		return err
 	}
+	if err := e.db.SetRunCIReady(run.ID, false); err != nil {
+		return e.failRun(run, repo, fmt.Errorf("clear recovered CI readiness: %w", err), ctx)
+	}
+	wasCIReady := run.CIReadyAt != nil || run.CIReadyNoCI
+	run.CIReadyAt = nil
+	run.CIReadyNoCI = false
+	if wasCIReady {
+		e.emitCIReadinessEvent(run, repo, false, false)
+	}
 	logDir := e.paths.RunLogDir(run.ID)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
