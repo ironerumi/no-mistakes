@@ -209,6 +209,41 @@ func TestCapturePreservesFixRoundStartingHead(t *testing.T) {
 	}
 }
 
+// A post-review pass reviewed only the commits after an approval; replaying
+// it from the run's base would score a full review it never was.
+func TestCaptureLeavesOutPostReviewPassRounds(t *testing.T) {
+	ctx := context.Background()
+	p, sourceDB, run, repo, firstRound := setupCapturedRun(t, ctx)
+	defer sourceDB.Close()
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "README.md"), []byte("# Sample\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, ctx, repo.WorkingPath, "add", "README.md")
+	mustGit(t, ctx, repo.WorkingPath, "commit", "-m", "no-mistakes(document): describe sample")
+	mustGit(t, ctx, repo.WorkingPath, "push", "origin", "feature/eval")
+	documentSHA := mustGit(t, ctx, repo.WorkingPath, "rev-parse", "HEAD")
+	steps, err := sourceDB.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clean := `{"findings":[],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`
+	if _, err := sourceDB.InsertReviewStepRoundWithProvenance(steps[0].ID, 2, db.RoundTriggerPostReview, &clean, nil, documentSHA, stringValue(firstRound.ReviewedHeadSHA), stringValue(firstRound.TrustedConfigSHA), firstRound.GlobalConfigYAML, firstRound.RepoConfigYAML, 25); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(p.EvalDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cases, err := Capture(ctx, store, p, sourceDB, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cases) != 1 || cases[0].SourceRoundID != firstRound.ID {
+		t.Fatalf("captured cases = %#v, want only the full review round", cases)
+	}
+}
+
 func TestReplayRestoresCaseIntoAnIsolatedWorktree(t *testing.T) {
 	ctx := context.Background()
 	p, sourceDB, run, _, _ := setupCapturedRun(t, ctx)
@@ -334,6 +369,7 @@ func TestReplayPinsCandidateModelAndEffortOnTheHarness(t *testing.T) {
 // only thing that may decide what the harness runs as.
 func TestCaptureStripsEveryHarnessPinFromThePinnedConfig(t *testing.T) {
 	pinned := []byte("agent: codex\nagent_args_override:\n  codex:\n    - -m\n    - gpt-5.4\nagent_config:\n  codex:\n    model: gpt-5.4\n    effort: high\nlog_level: warn\n")
+	pinned = append(pinned, []byte("review_agents:\n  reviewer: {agent: pi, model: review-model, effort: max}\n  fixer: {agent: pi, model: fix-model, effort: high}\n")...)
 	neutral, err := agentNeutralGlobalConfig(pinned)
 	if err != nil {
 		t.Fatal(err)
@@ -350,8 +386,8 @@ func TestCaptureStripsEveryHarnessPinFromThePinnedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AgentConfig != nil {
-		t.Fatalf("neutral config resolves an agent profile: %#v", cfg.AgentConfig)
+	if cfg.AgentConfig != nil || cfg.ReviewAgents != nil {
+		t.Fatalf("neutral config resolves profiles: %#v, %#v", cfg.AgentConfig, cfg.ReviewAgents)
 	}
 }
 
@@ -360,15 +396,16 @@ func TestBaselineForRoundIncludesOnlyCompleteReviewInvocationMetrics(t *testing.
 	invocations := []db.AgentInvocation{
 		{StepName: string(types.StepReview), Round: 2, Purpose: "review-fix", DurationMS: 900, DeltaInputTokens: &input, DeltaOutputTokens: &output, DeltaCacheReadTokens: &cache},
 		{StepName: string(types.StepReview), Round: 2, Purpose: "review", DurationMS: 100, DeltaInputTokens: &input, DeltaOutputTokens: &output, DeltaCacheReadTokens: &cache},
+		{StepName: string(types.StepReview), Round: 2, Purpose: "review-coverage", DurationMS: 50, DeltaInputTokens: &input, DeltaOutputTokens: &output, DeltaCacheReadTokens: &cache},
 	}
 	baseline := baselineForRound(invocations, 2)
-	if baseline.DurationMS != 100 || !baseline.TokensReported || baseline.InputTokens != 100 || baseline.OutputTokens != 20 || baseline.CacheReadTokens != 30 || baseline.FreshInputTokens != 70 {
-		t.Fatalf("review baseline = %#v", baseline)
+	if baseline.DurationMS != 150 || !baseline.TokensReported || baseline.InputTokens != 200 || baseline.OutputTokens != 40 || baseline.CacheReadTokens != 60 || baseline.FreshInputTokens != 140 {
+		t.Fatalf("review baseline = %#v, want the focused coverage-completion turn's cost included alongside the initial review turn's, and the fix round's excluded", baseline)
 	}
 
 	invocations = append(invocations, db.AgentInvocation{StepName: string(types.StepReview), Round: 2, Purpose: "review", DurationMS: 50})
 	baseline = baselineForRound(invocations, 2)
-	if baseline.DurationMS != 150 || baseline.TokensReported || baseline.InputTokens != 0 || baseline.OutputTokens != 0 || baseline.CacheReadTokens != 0 || baseline.FreshInputTokens != 0 {
+	if baseline.DurationMS != 200 || baseline.TokensReported || baseline.InputTokens != 0 || baseline.OutputTokens != 0 || baseline.CacheReadTokens != 0 || baseline.FreshInputTokens != 0 {
 		t.Fatalf("incomplete review baseline = %#v", baseline)
 	}
 }
@@ -590,7 +627,7 @@ func TestAverageTokensRequiresCompleteReplayCoverage(t *testing.T) {
 		{TokensReported: true, FreshInputTokens: 10, OutputTokens: 2},
 		{TokensReported: false},
 	}
-	if cost, ok := averageTokens(rows); ok {
+	if cost, _, _, ok := averageTokens(rows); ok {
 		t.Fatalf("partial token cost = %v, want unknown", cost)
 	}
 }

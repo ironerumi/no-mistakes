@@ -8,6 +8,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 )
 
 // evidenceLinks describes a published evidence commit well enough to turn a
@@ -30,8 +31,9 @@ type evidenceLinks struct {
 // publishRunEvidence copies this run's evidence directory onto the repository's
 // orphan evidence branch and returns the links the PR body should use. It
 // returns nil whenever evidence is not opted in, there is nothing to publish,
-// or publication failed - in which case artifacts keep rendering as local
-// paths rather than as links that would not resolve.
+// or publication failed. The renderer then omits evidence-branch links that
+// would not resolve; it may still use an uploaded media attachment, otherwise
+// the artifact keeps its local-path rendering.
 func publishRunEvidence(sctx *pipeline.StepContext) *evidenceLinks {
 	if sctx == nil || sctx.Config == nil || sctx.Repo == nil || sctx.Run == nil || !sctx.Config.Test.Evidence.StoreInRepo {
 		return nil
@@ -61,12 +63,19 @@ func publishRunEvidence(sctx *pipeline.StepContext) *evidenceLinks {
 	}
 
 	result, err := evidence.Publish(sctx.Ctx, evidence.Request{
-		RepoDir:           sctx.WorkDir,
-		PushURL:           resolvePushURL(sctx),
-		Branch:            sctx.Config.Test.Evidence.Branch,
-		Dir:               sctx.Config.Test.Evidence.Dir,
-		Segments:          segments,
-		SourceDir:         sourceDir,
+		RepoDir:   sctx.WorkDir,
+		PushURL:   resolvePushURL(sctx),
+		Branch:    sctx.Config.Test.Evidence.Branch,
+		Dir:       sctx.Config.Test.Evidence.Dir,
+		Segments:  segments,
+		SourceDir: sourceDir,
+		// The review conversation lives in this same directory but is NOT test
+		// evidence and must never be published: the operator's questions and
+		// answers would land on the orphan branch verbatim and permanently,
+		// with none of the bounding or home-path redaction the deliberate
+		// PR-body rendering applies. The name comes from the package that owns
+		// the location, so the two cannot drift.
+		ExcludeDirs:       []string{reviewqa.DirName},
 		Message:           fmt.Sprintf("no-mistakes: evidence for %s (run %s)", branch, sctx.Run.ID),
 		ForbiddenBranches: []string{branch, sctx.Repo.DefaultBranch},
 	})

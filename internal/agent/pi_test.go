@@ -142,24 +142,39 @@ func TestNewWithOptions_PiCombinesNeutralizationAndRunEnvironment(t *testing.T) 
 	}
 }
 
-func TestPiAgent_BuildPromptIncludesSchema(t *testing.T) {
+func TestPiAgent_BuildPromptNamesOutputTool(t *testing.T) {
 	schema := json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`)
-	prompt := buildPiPrompt("do a thing", schema)
+	prompt := buildPiPrompt("do a thing", schema, true)
 	if !strings.Contains(prompt, "do a thing") {
 		t.Errorf("prompt missing user prompt: %s", prompt)
 	}
 	if !strings.Contains(prompt, "no-mistakes final output contract") {
 		t.Errorf("prompt missing contract header: %s", prompt)
 	}
-	if !strings.Contains(prompt, "summary") {
-		t.Errorf("prompt missing schema property: %s", prompt)
+	if !strings.Contains(prompt, "calling no_mistakes_output") {
+		t.Errorf("prompt missing output tool: %s", prompt)
+	}
+	if strings.Contains(prompt, `"properties"`) {
+		t.Errorf("schema must be a tool declaration, not prompt-only: %s", prompt)
+	}
+}
+
+func TestPiAgent_BuildPromptInlinesSchemaWithoutStrictOutput(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`)
+	prompt := buildPiPrompt("do a thing", schema, false)
+	if !strings.Contains(prompt, "no-mistakes final output contract") || !strings.Contains(prompt, `"summary"`) {
+		t.Errorf("prompt path must inline the schema: %s", prompt)
+	}
+	if strings.Contains(prompt, "no_mistakes_output") {
+		t.Errorf("prompt path must not name the absent output tool: %s", prompt)
 	}
 }
 
 func TestPiAgent_BuildPromptOmitsContractWhenSchemaEmpty(t *testing.T) {
-	prompt := buildPiPrompt("do a thing", nil)
-	if prompt != "do a thing" {
-		t.Errorf("expected raw prompt when no schema, got: %q", prompt)
+	for _, strict := range []bool{true, false} {
+		if prompt := buildPiPrompt("do a thing", nil, strict); prompt != "do a thing" {
+			t.Errorf("expected raw prompt when no schema, got: %q", prompt)
+		}
 	}
 }
 
@@ -233,23 +248,21 @@ printf '%s\n' '{"type":"agent_end","messages":[]}'
 		"echo {\"type\":\"agent_end\",\"messages\":[]}",
 	}, "\r\n"))
 
-	schema := json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`)
 	pa := &piAgent{bin: bin}
 
 	var chunks []string
 	result, err := pa.Run(context.Background(), RunOpts{
-		Prompt:     "review",
-		CWD:        t.TempDir(),
-		JSONSchema: schema,
-		OnChunk:    func(s string) { chunks = append(chunks, s) },
+		Prompt:  "review",
+		CWD:     t.TempDir(),
+		OnChunk: func(s string) { chunks = append(chunks, s) },
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if string(result.Output) != `{"ok":true}` {
-		t.Fatalf("unexpected output: %s", string(result.Output))
+	if result.Text != `{"ok":true}` {
+		t.Fatalf("unexpected text: %s", result.Text)
 	}
-	if result.Usage.InputTokens != 11 || result.Usage.OutputTokens != 7 ||
+	if result.Usage.InputTokens != 15 || result.Usage.OutputTokens != 7 ||
 		result.Usage.CacheReadTokens != 3 || result.Usage.CacheCreationTokens != 1 {
 		t.Fatalf("unexpected usage: %+v", result.Usage)
 	}
@@ -284,18 +297,16 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"user","content":"prompt"
 		"echo {\"type\":\"agent_end\",\"messages\":[{\"role\":\"user\",\"content\":\"prompt\"},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"ok\\\":true}\"}]}]}",
 	}, "\r\n"))
 
-	schema := json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`)
 	pa := &piAgent{bin: bin}
 	result, err := pa.Run(context.Background(), RunOpts{
-		Prompt:     "review",
-		CWD:        t.TempDir(),
-		JSONSchema: schema,
+		Prompt: "review",
+		CWD:    t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if string(result.Output) != `{"ok":true}` {
-		t.Fatalf("unexpected output: %s", string(result.Output))
+	if result.Text != `{"ok":true}` {
+		t.Fatalf("unexpected text: %s", result.Text)
 	}
 }
 
@@ -344,31 +355,30 @@ printf '%s\n' "{\"type\":\"agent_end\",\"messages\":[{\"role\":\"user\",\"conten
 		"echo {\"type\":\"agent_end\",\"messages\":[{\"role\":\"user\",\"content\":\"fix\"},{\"role\":\"assistant\",\"responseId\":\"r!input!\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"ok\\\":true}\"}],\"usage\":{\"input\":!input!,\"output\":7,\"cacheRead\":3,\"cacheWrite\":1}}]}",
 	}, "\r\n"))
 
-	schema := json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`)
 	pa := &piAgent{bin: bin}
-	started, err := pa.Run(context.Background(), RunOpts{Prompt: "fix", CWD: workDir, JSONSchema: schema, Session: &SessionRef{}})
+	started, err := pa.Run(context.Background(), RunOpts{Prompt: "fix", CWD: workDir, Session: &SessionRef{}})
 	if err != nil {
 		t.Fatalf("start durable Pi session: %v", err)
 	}
 	if started.SessionID != sessionID || started.Resumed {
 		t.Fatalf("started session = %+v, want id=%q and Resumed=false", started, sessionID)
 	}
-	if started.Usage.InputTokens != 11 || started.SessionUsageCumulative {
-		t.Fatalf("started usage = %+v, want invocation-only input 11", started.Usage)
+	if started.Usage.InputTokens != 15 || started.SessionUsageCumulative {
+		t.Fatalf("started usage = %+v, want invocation-only input 15", started.Usage)
 	}
 	if got, err := os.ReadFile(filepath.Join(workDir, "pi-session-id")); err != nil || strings.TrimSpace(string(got)) != sessionID {
 		t.Fatalf("persisted session ID = %q, %v; want %q", got, err, sessionID)
 	}
 
-	resumed, err := pa.Run(context.Background(), RunOpts{Prompt: "fix", CWD: workDir, JSONSchema: schema, Session: &SessionRef{ID: started.SessionID}})
+	resumed, err := pa.Run(context.Background(), RunOpts{Prompt: "fix", CWD: workDir, Session: &SessionRef{ID: started.SessionID}})
 	if err != nil {
 		t.Fatalf("resume durable Pi session: %v", err)
 	}
 	if resumed.SessionID != sessionID || !resumed.Resumed {
 		t.Fatalf("resumed session = %+v, want id=%q and Resumed=true", resumed, sessionID)
 	}
-	if resumed.Usage.InputTokens != 22 || resumed.SessionUsageCumulative {
-		t.Fatalf("resumed usage = %+v, want invocation-only input 22", resumed.Usage)
+	if resumed.Usage.InputTokens != 26 || resumed.SessionUsageCumulative {
+		t.Fatalf("resumed usage = %+v, want invocation-only input 26", resumed.Usage)
 	}
 
 	argv, err := os.ReadFile(filepath.Join(workDir, "pi-argv.txt"))
@@ -377,6 +387,60 @@ printf '%s\n' "{\"type\":\"agent_end\",\"messages\":[{\"role\":\"user\",\"conten
 	}
 	if got, want := strings.Fields(string(argv)), []string{"--mode", "json", "--mode", "json", "--session", sessionID}; strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("pi argv = %q, want %q", got, want)
+	}
+}
+
+func TestPiAgent_SchemaRejectedOutputStillReportsUsage(t *testing.T) {
+	bin := writePiOutputFixture(t, piStrictVersion, piOutputEvents(`{"ok":"not a boolean"}`), nil, "")
+
+	result, err := (&piAgent{bin: bin}).Run(context.Background(), RunOpts{
+		Prompt:     "review",
+		CWD:        t.TempDir(),
+		JSONSchema: json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`),
+	})
+	if err == nil {
+		t.Fatal("expected schema rejection")
+	}
+	if !IsStructuredOutputRejected(err) {
+		t.Fatalf("want structured-output rejection, got %v", err)
+	}
+	if result == nil {
+		t.Fatal("schema rejection must still return parsed usage")
+	}
+	if result.Usage.InputTokens != 22 || result.Usage.OutputTokens != 7 ||
+		result.Usage.CacheReadTokens != 9 || result.Usage.CacheCreationTokens != 2 ||
+		!result.UsageReported {
+		t.Fatalf("usage = %+v reported=%v", result.Usage, result.UsageReported)
+	}
+}
+
+func TestPiAgent_ExitFailureStillReportsParsedUsage(t *testing.T) {
+	bin := writeFakePi(t, t.TempDir(), `#!/bin/sh
+cat > /dev/null
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"{\"ok\":true}"}],"usage":{"input":11,"output":7,"cacheRead":9,"cacheWrite":2}}}'
+printf '%s\n' '{"type":"agent_end","messages":[]}'
+exit 1
+`, strings.Join([]string{
+		"@echo off",
+		"more > nul",
+		"echo {\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"ok\\\":true}\"}],\"usage\":{\"input\":11,\"output\":7,\"cacheRead\":9,\"cacheWrite\":2}}}",
+		"echo {\"type\":\"agent_end\",\"messages\":[]}",
+		"exit /b 1",
+	}, "\r\n"))
+
+	result, err := (&piAgent{bin: bin}).Run(context.Background(), RunOpts{
+		Prompt: "review",
+		CWD:    t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("expected process exit error")
+	}
+	if result == nil {
+		t.Fatal("exit failure must still return parsed usage")
+	}
+	if result.Usage.InputTokens != 22 || result.Usage.OutputTokens != 7 ||
+		result.Usage.CacheReadTokens != 9 || !result.UsageReported {
+		t.Fatalf("usage = %+v reported=%v", result.Usage, result.UsageReported)
 	}
 }
 
@@ -414,13 +478,28 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":"ok
 		"echo {\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"content\":\"ok\"}]}",
 	}, "\r\n"))
 
-	_, err := (&piAgent{bin: bin}).Run(context.Background(), RunOpts{
+	const (
+		requested = "019ff2f3-5f31-744b-90b8-679074ff7687"
+		served    = "019ff2f3-5f31-744b-90b8-679074ff7686"
+	)
+	result, err := (&piAgent{bin: bin}).Run(context.Background(), RunOpts{
 		Prompt:  "fix",
 		CWD:     t.TempDir(),
-		Session: &SessionRef{ID: "019ff2f3-5f31-744b-90b8-679074ff7687"},
+		Session: &SessionRef{ID: requested},
 	})
 	if err == nil || !strings.Contains(err.Error(), "did not confirm") {
 		t.Fatalf("resume mismatch error = %v", err)
+	}
+	// The replacement identity is the evidence the resume did not happen, so
+	// the refused turn must still report which session it actually ran in.
+	if result == nil {
+		t.Fatal("a refused resume must still report the session Pi served")
+	}
+	if result.SessionID != served {
+		t.Fatalf("session id = %q, want the session Pi actually served %q", result.SessionID, served)
+	}
+	if result.Resumed {
+		t.Fatal("a refused resume must not claim it resumed")
 	}
 }
 
@@ -483,7 +562,7 @@ func TestPiParser_SumsUniqueAssistantUsageAcrossTurns(t *testing.T) {
 	if err := pp.parse(context.Background(), strings.NewReader(stream)); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	want := TokenUsage{InputTokens: 11, OutputTokens: 7, CacheReadTokens: 9, CacheCreationTokens: 11, Reported: true, CacheCreationReported: true}
+	want := TokenUsage{InputTokens: 31, OutputTokens: 7, CacheReadTokens: 9, CacheCreationTokens: 11, Reported: true, CacheCreationReported: true}
 	if pp.usage != want {
 		t.Fatalf("usage = %+v, want %+v", pp.usage, want)
 	}
@@ -702,5 +781,47 @@ exit 0
 	}
 	if len(phases) == 0 {
 		t.Fatal("expected start and exit lifecycle events even for a silent subprocess")
+	}
+}
+
+// TestPiAgent_FailedTurnReportsTheSessionPiServed covers the case where the
+// served session is the only fact the turn produced: Pi announces a session
+// that is not the one we asked to resume and the process then dies before any
+// usage arrives. That mismatch is proof the resume was silently replaced, so
+// the Result must exist to carry it - resultFromUsage alone returns nil here,
+// and invocationSessionMode would then record the turn as a clean resume.
+func TestPiAgent_FailedTurnReportsTheSessionPiServed(t *testing.T) {
+	const (
+		requested = "019ff2f3-5f31-744b-90b8-679074ff7687"
+		served    = "019ff2f3-5f31-744b-90b8-679074ff7686"
+	)
+
+	bin := writeFakePi(t, t.TempDir(), `#!/bin/sh
+cat > /dev/null
+printf '%s\n' '{"type":"session","id":"`+served+`"}'
+exit 1
+`, strings.Join([]string{
+		"@echo off",
+		"more > nul",
+		"echo {\"type\":\"session\",\"id\":\"" + served + "\"}",
+		"exit /b 1",
+	}, "\r\n"))
+
+	result, err := (&piAgent{bin: bin}).Run(context.Background(), RunOpts{
+		Prompt:  "fix",
+		CWD:     t.TempDir(),
+		Session: &SessionRef{ID: requested},
+	})
+	if err == nil {
+		t.Fatal("expected the non-zero exit to fail the turn")
+	}
+	if result == nil {
+		t.Fatal("a failed turn must still report the session Pi served")
+	}
+	if result.SessionID != served {
+		t.Errorf("session id = %q, want the session Pi actually served %q", result.SessionID, served)
+	}
+	if result.UsageReported {
+		t.Error("Pi reported no usage; the result must not claim it did")
 	}
 }

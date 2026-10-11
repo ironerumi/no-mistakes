@@ -13,6 +13,7 @@ func opencodeTokensToUsage(t *opencodeTokens) TokenUsage {
 		Reported:     true,
 	}
 	if t.Cache != nil {
+		u.InputTokens += t.Cache.Read + t.Cache.Write
 		u.CacheReadTokens = t.Cache.Read
 		u.CacheCreationTokens = t.Cache.Write
 		u.CacheCreationReported = true
@@ -57,6 +58,10 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 		case "session.error":
 			if props != nil && isThinkingToolChoiceConflict(props.Error) {
 				streamErr = errOpencodeThinkingToolChoiceConflict
+				return false
+			}
+			if props != nil && isForcedToolChoiceUnsupported(props.Error) {
+				streamErr = errOpencodeForcedToolChoiceUnsupported
 				return false
 			}
 

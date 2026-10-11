@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -188,6 +189,12 @@ func stepEnvironment(sctx *pipeline.StepContext) []string {
 // non-interactive git overrides. It is like git.Run but respects sctx.Env so
 // step-scoped PATH and credential environment stay in effect.
 func stepGitRun(sctx *pipeline.StepContext, args ...string) (string, error) {
+	out, err := stepGitRunRaw(sctx, args...)
+	return strings.TrimSpace(out), err
+}
+
+// stepGitRunRaw preserves NUL-delimited paths and porcelain status columns.
+func stepGitRunRaw(sctx *pipeline.StepContext, args ...string) (string, error) {
 	cmd := stepCmd(sctx, "git", args...)
 	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
 	out, err := cmd.Output()
@@ -198,7 +205,7 @@ func stepGitRun(sctx *pipeline.StepContext, args ...string) (string, error) {
 		}
 		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
 	}
-	return strings.TrimSpace(string(out)), nil
+	return string(out), nil
 }
 
 func stepGitHeadSHA(sctx *pipeline.StepContext) (string, error) {
@@ -303,13 +310,27 @@ func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdSt
 }
 
 func runShellCommandWithProcessEnv(ctx context.Context, dir string, env []string, cmdStr string) (string, int, error) {
+	return runShellCommandWithPriority(ctx, dir, env, cmdStr, 0)
+}
+
+func runShellCommandWithPriority(ctx context.Context, dir string, env []string, cmdStr string, nice int) (string, int, error) {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(ctx, "cmd.exe", "/c", cmdStr)
 	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
+		cmd = exec.CommandContext(ctx, "sh", "-c", shellenv.OwnOOMScoreScript(cmdStr))
 	}
-	shellenv.ConfigureShellCommand(cmd)
+	if nice != 0 {
+		if nice < 0 || nice > 19 || runtime.GOOS == "windows" {
+			return "", -1, fmt.Errorf("unsupported command niceness %d on %s", nice, runtime.GOOS)
+		}
+		if cmd.Err != nil {
+			return "", -1, cmd.Err
+		}
+		// Run the already-resolved shell under nice with the same arguments.
+		cmd = exec.CommandContext(ctx, "nice", append([]string{"-n", strconv.Itoa(nice), cmd.Path}, cmd.Args[1:]...)...)
+	}
+	shellenv.ConfigureCooperativeShellCommand(cmd)
 	cmd.Dir = dir
 	if env != nil {
 		cmd.Env = env
@@ -319,7 +340,7 @@ func runShellCommandWithProcessEnv(ctx context.Context, dir string, env []string
 		if ee, ok := err.(*exec.ExitError); ok {
 			return string(out), ee.ExitCode(), nil
 		}
-		return "", -1, fmt.Errorf("run command %q: %w", cmdStr, err)
+		return string(out), -1, fmt.Errorf("run command %q: %w", cmdStr, err)
 	}
 	return string(out), 0, nil
 }

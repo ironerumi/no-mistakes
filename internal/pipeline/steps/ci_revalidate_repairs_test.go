@@ -65,10 +65,21 @@ func newCIRepairFixture(t *testing.T, revalidate bool, agentAction func(workDir 
 
 	prURL := "https://github.com/test/repo/pull/42"
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = fakeCIGH(t, "OPEN", `[{"name":"test","state":"FAILURE","bucket":"fail"}]`)
+	sctx.Env = append(fakeCIGH(t, "OPEN", `[{"name":"test","state":"FAILURE","bucket":"fail"}]`),
+		"FAKE_CLI_PR_HEAD_SHA="+headSHA,
+		// attestHeadBeforePush discovers the PR via FindPR before every publish
+		// (Push and a CI repair alike), so the fixture's fake gh must be able to
+		// resolve the same PR the fixture's own persisted PRURL names.
+		`FAKE_CLI_PR_LIST_JSON=[{"number":42,"url":"https://github.com/test/repo/pull/42","baseRefName":"main"}]`,
+	)
 	sctx.Run.PRURL = &prURL
 	sctx.Run.Branch = "refs/heads/feature"
-	sctx.Repo.UpstreamURL = upstream
+	// resolveUpstreamURL prefers the worktree's real "origin" remote (set to
+	// the local bare upstream above) for the actual git push, so this
+	// GitHub-shaped value only drives provider/host/repo-slug resolution -
+	// it must match FAKE_CLI_PR_LIST_JSON above for FindPR's own repo-slug
+	// cross-check to accept the discovered PR.
+	sctx.Repo.UpstreamURL = "https://github.com/test/repo"
 	sctx.Config.CITimeout = 30 * time.Second
 	sctx.Config.AutoFix = config.AutoFix{CI: 1}
 	sctx.Config.CI.RevalidateRepairs = revalidate
@@ -105,7 +116,7 @@ func (f *ciRepairFixture) run(t *testing.T) (*pipeline.StepOutcome, error) {
 		}
 		return ctx.Err()
 	}}
-	return step.Execute(f.sctx)
+	return driveCI(t, step, f.sctx)
 }
 
 func (f *ciRepairFixture) localHead(t *testing.T) string {
@@ -154,7 +165,7 @@ func TestCIStep_RevalidateRepairsPolicySelectsRepairDelivery(t *testing.T) {
 			// provider poll and several subprocesses per case for nothing.
 			// TestCIStep_MonitorRestartsAtReviewForAHeldRepair covers the
 			// monitor turning Revalidate into RestartFrom.
-			repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check")
+			repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check", nil)
 			if err != nil {
 				t.Fatalf("CI repair returned error: %v\nlog:\n%s", err, f.log())
 			}
@@ -226,7 +237,7 @@ func TestCIStep_NoChangeRepairNeitherPublishesNorRestarts(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			f := newCIRepairFixture(t, revalidate, nil)
-			repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check")
+			repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check", nil)
 			if err != nil {
 				t.Fatalf("CI repair returned error: %v", err)
 			}
@@ -268,7 +279,7 @@ func TestCIStep_AgentCommittedRepairFollowsThePolicy(t *testing.T) {
 			os.WriteFile(filepath.Join(f.dir, "resolved.txt"), []byte("resolved"), 0o644)
 			gitCmd(t, f.dir, "add", "-A")
 			gitCmd(t, f.dir, "commit", "-m", "agent resolved the failure")
-			repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check")
+			repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check", nil)
 			if err != nil {
 				t.Fatalf("CI repair returned error: %v\nlog:\n%s", err, f.log())
 			}
@@ -304,7 +315,7 @@ func TestCIStep_PartialPublicationRecordsNothing(t *testing.T) {
 	}
 	f.sctx.GateDir = brokenGate
 
-	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check")
+	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check", nil)
 	if err == nil {
 		t.Fatal("a publication that could not settle the gate mirror was reported as complete")
 	}
@@ -330,7 +341,7 @@ func TestCIStep_PartialPublicationRecordsNothing(t *testing.T) {
 	// With a working gate the same path completes, and the no-op push over the
 	// already-pushed head is not an obstacle.
 	f.sctx.GateDir = f.gateDir
-	repair, err = (&CIStep{}).commitRepair(f.sctx, "repair the failing check")
+	repair, err = (&CIStep{}).commitRepair(f.sctx, "repair the failing check", nil)
 	if err != nil {
 		t.Fatalf("the next attempt did not complete the publication: %v\nlog:\n%s", err, f.log())
 	}
@@ -428,7 +439,7 @@ func TestCIStep_ConflictRepairAlwaysRevalidates(t *testing.T) {
 				t.Fatal("the rewrite did not move the reviewed head")
 			}
 
-			repair, err := (&CIStep{}).commitRepair(f.sctx, "resolve merge conflict")
+			repair, err := (&CIStep{}).commitRepair(f.sctx, "resolve merge conflict", nil)
 			if err != nil {
 				t.Fatalf("a conflict repair must revalidate, not fail: %v\nlog:\n%s", err, f.log())
 			}
@@ -489,9 +500,11 @@ func TestCIStep_ManualRepairFollowsTheSamePolicy(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			f := newCIRepairFixture(t, tc.revalidate, writeCIFix)
-			// Automatic auto-fix off; the user answered the gate with "fix".
+			// Automatic auto-fix off; the user answered the gate with "fix",
+			// selecting the failing check's finding.
 			f.sctx.Config.AutoFix = config.AutoFix{CI: 0}
 			f.sctx.Fixing = true
+			f.sctx.PreviousFindings = ciGateFindingsJSON("test")
 
 			outcome, err := f.run(t)
 			// Under the publish policy the monitor deliberately does NOT
@@ -507,8 +520,8 @@ func TestCIStep_ManualRepairFollowsTheSamePolicy(t *testing.T) {
 			if !tc.wantRestart && !errors.Is(err, context.Canceled) {
 				t.Fatalf("the publish policy must keep monitoring after a repair, got outcome %#v err %v", outcome, err)
 			}
-			if !strings.Contains(f.log(), "manual fix requested") {
-				t.Fatalf("expected the manual repair path; log:\n%s", f.log())
+			if !strings.Contains(f.log(), "repairing: test") {
+				t.Fatalf("expected the selected finding to be repaired; log:\n%s", f.log())
 			}
 			if f.localHead(t) == f.headSHA {
 				t.Fatal("the manual repair commit was never created")
@@ -537,7 +550,7 @@ func TestCIStep_RepairWithoutReviewAuthorityRevalidatesRatherThanPublishing(t *t
 	}
 	f.sctx.Run.ReviewApprovedHeadSHA = nil
 
-	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check")
+	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check", nil)
 	if err != nil {
 		t.Fatalf("CI repair returned error: %v", err)
 	}
@@ -566,7 +579,7 @@ func TestCIStep_FailedRevalidationWriteDoesNotAdvanceTheLiveHead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check"); err == nil {
+	if _, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check", nil); err == nil {
 		t.Fatal("a failed durable write was reported as a recorded repair")
 	}
 	if f.sctx.Run.HeadSHA != priorHead {

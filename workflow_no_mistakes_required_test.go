@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,7 +48,7 @@ const requireActionUsesPrefix = "kunchenguid/no-mistakes/"
 // deliberately asserted by value, not just by shape: the pin must always name
 // a commit that already carries the action, and bumping it is a separate,
 // deliberate pull request that updates this constant in the same change.
-const requiredActionPin = "32d396ac0f29135daf7fcb9964aba9d5f4e796d6"
+const requiredActionPin = "f6441c96c352a18b9cadcaef6b6c7017e9ac3970"
 
 var immutableActionPin = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
@@ -142,28 +143,15 @@ func evaluateRequiredWorkflowAuthorCondition(condition, author string) (bool, er
 // re-runs when the PR body is edited so a contributor cannot bypass by opening
 // clean then editing the body.
 //
-// It also pins the deliberate absence of "synchronize". A push never changes
-// the PR body, and the pipeline pushes (Push step) before it writes the
-// deterministic "## Pipeline" section (PR step), so on any PR whose body is not
-// yet compliant - every PR the pipeline adopts rather than opens itself - the
-// synchronize run pins a FAILURE check run to the new head for a body the same
-// run is about to fix. GitHub keeps that failure alongside the later `edited`
-// SUCCESS instead of replacing it, and `gh pr checks` collapses same-named
-// check runs by startedAt alone, so the pipeline's own CI monitor can read the
-// stale failure and park the run red with no push able to clear it (PR #773
-// carried check runs 96017425510 FAILURE and 96017420271 SUCCESS on one head).
-// Body-bearing events still bind attestation.head_sha to the PR head at that
-// event. No ruleset requires this status, so no head SHA needs a run of its own.
+// T2 includes "synchronize": since the pre-push attestation change (#994),
+// synchronize is the event that judges a pipeline-pushed head. #773 had
+// dropped it because a pipeline push pinned a FAILURE check run to the new
+// head before the PR step rewrote the body; that ordering no longer holds.
 func TestNoMistakesRequiredWorkflowTriggersOnRelevantPREvents(t *testing.T) {
 	types := requiredWorkflowPullRequestTypes(t, loadRequiredWorkflow(t))
-
-	for _, typ := range []string{"opened", "edited", "reopened"} {
-		if !slices.Contains(types, typ) {
-			t.Errorf("workflow must trigger on pull_request type %q, got %v", typ, types)
-		}
-	}
-	if slices.Contains(types, "synchronize") {
-		t.Errorf("workflow must not judge PR-body compliance on synchronize, got %v", types)
+	want := []string{"opened", "edited", "synchronize", "reopened"}
+	if !slices.Equal(types, want) {
+		t.Errorf("workflow pull_request types = %v, want exactly T2 %v", types, want)
 	}
 }
 
@@ -491,6 +479,20 @@ func runRequiredWorkflowCheckJob(t *testing.T, workflow requiredWorkflow, event 
 		t.Fatalf("write event payload: %v", err)
 	}
 
+	// This workflow forwards no explicit pr-body/pr-head-sha (the ordinary
+	// pull_request-triggered caller, see the workflow's own comment on
+	// PR_BODY/PR_HEAD_SHA), so verify.py now requires the live lookup to
+	// reach any verdict at all - a lookup failure fails the whole gate closed
+	// rather than falling back to the event payload (the fix this test suite
+	// exercises for the wiring surface; the verdict surface itself is owned
+	// by require_no_mistakes_action_test.go). Stub the live API to echo back
+	// this same event's body/head, so these wiring tests keep exercising the
+	// identical verdict logic they always have, just reached via the live
+	// path instead of the archived one - matching what a real runner with
+	// this workflow's `permissions: pull-requests: read` actually does.
+	requiredWorkflowTestRepo := "kunchenguid/no-mistakes"
+	liveServer := stubPullsAPI(t, requiredWorkflowTestRepo, strconv.FormatInt(prNumber, 10), http.StatusOK, event.Body, headSHA)
+
 	action := loadRequireAction(t, actionPath)
 	if action.Runs.Using != "composite" {
 		t.Fatalf("action runs.using = %q, want composite", action.Runs.Using)
@@ -544,11 +546,22 @@ func runRequiredWorkflowCheckJob(t *testing.T, workflow requiredWorkflow, event 
 	}
 
 	cmd := exec.Command(bash, "-c", compositeStep.Run)
-	cmd.Env = append(os.Environ(), env...)
+	// The composite action's own env mapping resolves an unset github-token
+	// `with:` to its action.yml default, the literal unresolved expression
+	// text "${{ github.token }}" - this offline harness has no Actions
+	// runner to evaluate that against, so it is never a usable token. Strip
+	// it (and any ambient GITHUB_API_URL/GITHUB_REPOSITORY this test binary
+	// happens to inherit) and set the three deterministically to the stub
+	// server above instead, exactly as runRequireAction does for the same
+	// reason.
+	cmd.Env = append(filterEnv(os.Environ(), "GITHUB_TOKEN", "GITHUB_API_URL", "GITHUB_REPOSITORY"), env...)
 	cmd.Env = append(cmd.Env,
 		"GITHUB_ACTION_PATH="+actionDir,
 		"GITHUB_EVENT_PATH="+eventPath,
 		"GITHUB_OUTPUT="+outputPath,
+		"GITHUB_TOKEN=test-token",
+		"GITHUB_API_URL="+liveServer.URL,
+		"GITHUB_REPOSITORY="+requiredWorkflowTestRepo,
 	)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf

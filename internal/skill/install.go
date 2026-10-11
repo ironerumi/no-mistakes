@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +28,16 @@ func InstallUser() ([]string, error) {
 	return Install(home)
 }
 
+// RefreshUser updates the user-level skill only where its content differs from
+// this binary's rendering. It returns the home-relative paths actually written.
+func RefreshUser() ([]string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve home directory: %w", err)
+	}
+	return install(home, true)
+}
+
 // Install writes SKILL.md into each agent skills directory under root
 // (normally the user's home directory), creating directories as needed. It
 // returns the root-relative paths written so the caller can report them.
@@ -39,6 +50,10 @@ func InstallUser() ([]string, error) {
 // not exist yet (a plain os.MkdirAll would fail with "file exists" on a dangling
 // symlink). Both logical bases stay readable afterward via the link.
 func Install(root string) ([]string, error) {
+	return install(root, false)
+}
+
+func install(root string, onlyChanged bool) ([]string, error) {
 	content := []byte(Markdown())
 	written := make([]string, 0, len(InstallBases))
 	for _, base := range InstallBases {
@@ -53,7 +68,17 @@ func Install(root string) ([]string, error) {
 		if err := os.MkdirAll(realDir, 0o755); err != nil {
 			return written, err
 		}
-		if err := os.WriteFile(filepath.Join(realDir, "SKILL.md"), content, 0o644); err != nil {
+		file := filepath.Join(realDir, "SKILL.md")
+		if onlyChanged {
+			current, err := os.ReadFile(file)
+			if err != nil && !os.IsNotExist(err) {
+				return written, err
+			}
+			if err == nil && bytes.Equal(current, content) {
+				continue
+			}
+		}
+		if err := os.WriteFile(file, content, 0o644); err != nil {
 			return written, err
 		}
 		written = append(written, rel)

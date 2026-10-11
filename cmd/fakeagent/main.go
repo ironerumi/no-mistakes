@@ -1,5 +1,5 @@
 // fakeagent is a deterministic stand-in for the real Claude, Codex, Grok,
-// OpenCode, and Antigravity CLIs used by no-mistakes' e2e tests. One binary is
+// OpenCode, Pi, and Antigravity CLIs used by no-mistakes' e2e tests. One binary is
 // compiled and then symlinked under each agent's dispatch name; Antigravity
 // is linked as both `antigravity` and its probed binary name `agy`.
 // argv[0]'s basename selects which wire protocol to speak.
@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/scm/plugin/fakeplugin"
 )
 
 func main() {
@@ -44,6 +46,8 @@ func run(argv []string) int {
 		return runCodex(args, os.Stdin, scenario)
 	case "grok":
 		return runGrok(args, scenario)
+	case "pi":
+		return runPi(args, os.Stdin, scenario)
 	case "antigravity", "agy":
 		return runAgy(args, scenario)
 	case "opencode":
@@ -52,6 +56,10 @@ func run(argv []string) int {
 		return runGhStub(args)
 	case "tea":
 		return runTeaStub(args)
+	case fakeplugin.ExecutableName:
+		// The reference provider plugin, configured through the global
+		// provider_plugins block by internal/e2e/provider_plugin_test.go.
+		return fakeplugin.Main(args, os.Stdin, os.Stdout, os.Getenv(fakeplugin.EnvState), os.Getenv(fakeplugin.EnvLog))
 	default:
 		fmt.Fprintf(os.Stderr, "fakeagent: invoked under unknown name %q (argv[0]=%q)\n", name, argv[0])
 		return 2
@@ -63,8 +71,11 @@ func run(argv []string) int {
 // returns non-zero (so SCM detection treats GitHub as unauthenticated)
 // and any other subcommand prints a clear error.
 func runGhStub(args []string) int {
-	if os.Getenv("FAKEAGENT_GH_MODE") == "fork-pr" {
+	switch os.Getenv("FAKEAGENT_GH_MODE") {
+	case "fork-pr":
 		return runGhForkPRStub(args)
+	case "stateful-pr":
+		return runGhStatefulPRStub(args)
 	}
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		fmt.Fprintln(os.Stderr, "fakeagent gh: not authenticated (e2e stub)")

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/e2edaemon"
@@ -56,8 +57,9 @@ const (
 
 // Replay runs exactly the captured review pass. It does not start a daemon or
 // use the production NM_HOME: every case is restored into a fresh temp gate and
-// worktree. Push, PR, CI, and all fix loops are intentionally absent from the
-// MVP subject under test.
+// worktree. Candidates inherit the caller's HOME so harness sign-in matches
+// an ordinary pipeline agent spawn. Push, PR, CI, and all fix loops are
+// intentionally absent from the MVP subject under test.
 func Replay(ctx context.Context, store *Store, opts ReplayOptions) (Session, []Evaluation, error) {
 	if store == nil {
 		return Session{}, nil, fmt.Errorf("eval replay requires a store")
@@ -214,7 +216,8 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 	// object pools, and Store.Prune all live under <NM_HOME>/eval, so a live
 	// sandbox nested there would sit inside the very state it is replaying.
 	// That isolation outranks moving it off the system temp directory; see the
-	// held-scope note in AGENTS.md ("no-mistakes Owns Its Own Scratch").
+	// held-scope note under "no-mistakes Owns Its Own Scratch" in
+	// .agents/skills/test-evidence-storage/SKILL.md.
 	root, err := os.MkdirTemp("", "nm-eval-replay-")
 	if err != nil {
 		evaluation.Error = safeurl.RedactText(fmt.Sprintf("create isolated replay root: %v", err))
@@ -226,12 +229,6 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 	isolatedPaths := paths.WithRoot(filepath.Join(root, "nmhome"))
 	if err := isolatedPaths.EnsureDirs(); err != nil {
 		evaluation.Error = safeurl.RedactText(fmt.Sprintf("create isolated eval state: %v", err))
-		evaluation.CompletedAt = time.Now().Unix()
-		return evaluation
-	}
-	isolatedHome := filepath.Join(root, "home")
-	if err := os.MkdirAll(isolatedHome, 0o755); err != nil {
-		evaluation.Error = safeurl.RedactText(fmt.Sprintf("create isolated eval home: %v", err))
 		evaluation.CompletedAt = time.Now().Unix()
 		return evaluation
 	}
@@ -314,17 +311,24 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 		StepResultID:          stepResultID,
 		Fixing:                fixing,
 		SkipFixExecution:      fixing,
+		EvalReplay:            true,
 		ReviewStartingHeadSHA: startingHeadSHA,
 		PreviousFindings:      previousFindings,
-		Env:                   []string{"NM_HOME=" + isolatedPaths.Root(), "HOME=" + isolatedHome},
-		Log:                   func(string) {},
-		LogChunk:              func(string) {},
-		LogFile:               func(string) {},
-		UserIntent:            c.Intent,
-		IntentSource:          c.IntentSource,
+		// Keep NM_HOME on the nested sandbox so replay cannot see or mutate
+		// production pipeline/eval state. Do not rewrite HOME: candidates use
+		// the same harness sign-in and user settings as an ordinary pipeline
+		// agent spawn. That is not a security sandbox; a candidate may still
+		// read and write ordinary HOME-relative agent files.
+		Env:          []string{"NM_HOME=" + isolatedPaths.Root()},
+		Log:          func(string) {},
+		LogChunk:     func(string) {},
+		LogFile:      func(string) {},
+		UserIntent:   c.Intent,
+		IntentSource: c.IntentSource,
 	})
-	// Candidate wall time is the actual review invocation, matching the local
-	// agent-invocation metric rather than charging case restoration setup.
+	// Candidate wall time is the actual review invocations, every rerun
+	// included, matching the local agent-invocation metric rather than
+	// charging case restoration setup.
 	evaluation.DurationMS = observed.durationMS
 	if evaluation.DurationMS == 0 && observed.result == nil {
 		evaluation.DurationMS = time.Since(started).Milliseconds()
@@ -334,16 +338,17 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 		evaluation.Model = observed.result.Model
 		if evaluation.Model == "" {
 			evaluation.Model = candidate.Model
-		} else if evaluation.Model != candidate.Model {
+		} else if !agentcfg.ServedMatchesRequested(candidate.Model, evaluation.Model, observed.result.ModelProvider) {
 			evaluation.Error = safeurl.RedactText(fmt.Sprintf("candidate served model %q, requested %q", evaluation.Model, candidate.Model))
 			return evaluation
 		}
-		if observed.result.UsageReported {
+		if !observed.usageMissing {
 			evaluation.TokensReported = true
-			evaluation.InputTokens = int64(observed.result.Usage.InputTokens)
-			evaluation.OutputTokens = int64(observed.result.Usage.OutputTokens)
-			evaluation.CacheReadTokens = int64(observed.result.Usage.CacheReadTokens)
-			evaluation.FreshInputTokens = int64(agent.FreshInputTokens(observed.result.Usage.InputTokens, observed.result.Usage.CacheReadTokens))
+			evaluation.InputTokens = int64(observed.usage.InputTokens)
+			evaluation.OutputTokens = int64(observed.usage.OutputTokens)
+			evaluation.CacheReadTokens = int64(observed.usage.CacheReadTokens)
+			evaluation.CacheWriteTokens = int64(observed.usage.CacheCreationTokens)
+			evaluation.FreshInputTokens = int64(observed.freshInputTokens)
 		}
 	}
 	if err != nil {
@@ -480,12 +485,19 @@ func replayConfig(c Case) (*config.Config, error) {
 }
 
 type observedAgent struct {
-	inner        agent.Agent
-	ownership    *e2edaemon.Ownership
-	result       *agent.Result
-	durationMS   int64
-	ownershipErr error
-	mu           sync.Mutex
+	inner      agent.Agent
+	ownership  *e2edaemon.Ownership
+	result     *agent.Result
+	durationMS int64
+	// A review can rerun, so usage sums every attempt, fresh input per attempt
+	// as the captured baseline does. usageMissing marks an attempt with no
+	// reported usage, which makes the sum incomplete rather than a smaller
+	// cost.
+	usage            agent.TokenUsage
+	freshInputTokens int
+	usageMissing     bool
+	ownershipErr     error
+	mu               sync.Mutex
 }
 
 func (a *observedAgent) Name() string { return a.inner.Name() }
@@ -506,10 +518,25 @@ func (a *observedAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Res
 			previousLifecycle(event)
 		}
 	}
+	// The adapter retries below this seam and hands back only its last
+	// attempt, so count each attempt as the recorder does. Without this a turn
+	// that burned four attempts would be charged for one and read as cheaper.
+	attempts := 0
+	previousAttempt := opts.OnAttempt
+	opts.OnAttempt = func(attempt agent.Attempt) {
+		if previousAttempt != nil {
+			previousAttempt(attempt)
+		}
+		attempts++
+		a.observeUsage(attempt.Result)
+	}
 	started := time.Now()
 	result, err := a.inner.Run(ctx, opts)
 	a.durationMS += time.Since(started).Milliseconds()
 	a.result = result
+	if attempts == 0 {
+		a.observeUsage(result)
+	}
 	a.mu.Lock()
 	ownershipErr := a.ownershipErr
 	a.mu.Unlock()
@@ -517,6 +544,15 @@ func (a *observedAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Res
 		return result, ownershipErr
 	}
 	return result, err
+}
+
+func (a *observedAgent) observeUsage(result *agent.Result) {
+	if result == nil || !result.UsageReported {
+		a.usageMissing = true
+		return
+	}
+	a.usage.Add(result.Usage)
+	a.freshInputTokens += agent.FreshInputTokens(result.Usage.InputTokens, result.Usage.CacheReadTokens+result.Usage.CacheCreationTokens)
 }
 
 func findingCount(raw string) int {
@@ -545,12 +581,13 @@ func (s *Store) persistEvaluation(c Case, evaluation Evaluation) error {
 		reported = 1
 	}
 	_, err := s.db.Exec(`INSERT INTO evaluations
-(id, session_id, case_id, candidate, repeat_number, started_at, completed_at, status, gold_count, true_positive, false_negative, false_positive, pending, tokens_reported, input_tokens, output_tokens, fresh_input_tokens, duration_ms, path)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+(id, session_id, case_id, candidate, repeat_number, started_at, completed_at, status, gold_count, true_positive, false_negative, false_positive, pending, tokens_reported, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, fresh_input_tokens, duration_ms, path)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		evaluation.ID, evaluation.SessionID, evaluation.CaseID, evaluation.Candidate, evaluation.Repeat,
 		evaluation.StartedAt, evaluation.CompletedAt, evaluation.Status, evaluation.GoldCount,
 		evaluation.TruePositive, evaluation.FalseNegative, evaluation.FalsePositive, evaluation.Pending, reported,
-		evaluation.InputTokens, evaluation.OutputTokens, evaluation.FreshInputTokens, evaluation.DurationMS, path)
+		evaluation.InputTokens, evaluation.OutputTokens, evaluation.CacheReadTokens, evaluation.CacheWriteTokens,
+		evaluation.FreshInputTokens, evaluation.DurationMS, path)
 	if err != nil {
 		return fmt.Errorf("record eval result: %w", err)
 	}

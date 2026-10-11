@@ -80,9 +80,9 @@ type sourceInvocation struct {
 	Agent                string `json:"agent"`
 	Model                string `json:"model,omitempty"`
 	DurationMS           int64  `json:"duration_ms"`
-	InputTokens          int    `json:"input_tokens"`
-	OutputTokens         int    `json:"output_tokens"`
-	CacheReadTokens      int    `json:"cache_read_tokens"`
+	InputTokens          *int   `json:"input_tokens,omitempty"`
+	OutputTokens         *int   `json:"output_tokens,omitempty"`
+	CacheReadTokens      *int   `json:"cache_read_tokens,omitempty"`
 	FreshInputTokens     *int   `json:"fresh_input_tokens,omitempty"`
 	DeltaInputTokens     *int   `json:"delta_input_tokens,omitempty"`
 	DeltaOutputTokens    *int   `json:"delta_output_tokens,omitempty"`
@@ -171,6 +171,13 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 	}
 	captured := make([]Case, 0, len(reviewRounds))
 	for _, round := range reviewRounds {
+		// A post-review pass reviews only the commits after an approval, a
+		// scope a case replayed from the run's base cannot reproduce. The pass
+		// and every round after it are left out rather than captured as a
+		// full review they never were.
+		if round.IsPostReviewPass() {
+			break
+		}
 		if round.FindingsJSON == nil || strings.TrimSpace(*round.FindingsJSON) == "" {
 			// An interrupted or cancelled later round is not a replayable
 			// pass. Skip it so a completed sibling of the same run can still
@@ -324,6 +331,7 @@ func agentNeutralGlobalConfig(data []byte) ([]byte, error) {
 	delete(raw, "agent")
 	delete(raw, "agent_args_override")
 	delete(raw, "agent_config")
+	delete(raw, "review_agents")
 	out, err := yaml.Marshal(raw)
 	if err != nil {
 		return nil, fmt.Errorf("serialize agent-neutral global config: %w", err)
@@ -431,7 +439,10 @@ func baselineForRound(invocations []db.AgentInvocation, round int) BaselineMetri
 	seen := false
 	complete := true
 	for _, inv := range invocations {
-		if inv.StepName != string(types.StepReview) || inv.Round != round || inv.Purpose != "review" {
+		if inv.StepName != string(types.StepReview) || inv.Round != round {
+			continue
+		}
+		if inv.Purpose != "review" && inv.Purpose != "review-coverage" {
 			continue
 		}
 		seen = true
