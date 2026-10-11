@@ -38,6 +38,7 @@ import (
 // attestation binds to. Tests that execute the gate pass the same value as the
 // PR head SHA unless they are asserting a mismatch.
 const requiredWorkflowTestHeadSHA = "0123456789abcdef0123456789abcdef01234567"
+const requiredWorkflowRepository = "kunchenguid/no-mistakes"
 
 // requireActionUsesPrefix is the `uses:` prefix every enforcing repository in
 // the fleet points at. The path after it must resolve to the action directory
@@ -110,7 +111,7 @@ func TestNoMistakesRequiredWorkflowExemptsReleaseAutomation(t *testing.T) {
 		{login: "unlisted-automation[bot]", wantRun: true},
 	} {
 		t.Run(tc.login, func(t *testing.T) {
-			got, err := evaluateRequiredWorkflowAuthorCondition(condition, tc.login)
+			got, err := evaluateWorkflowForkCondition(condition, requiredWorkflowRepository, tc.login)
 			if err != nil {
 				t.Fatalf("evaluate check job condition: %v", err)
 			}
@@ -121,22 +122,62 @@ func TestNoMistakesRequiredWorkflowExemptsReleaseAutomation(t *testing.T) {
 	}
 }
 
-func evaluateRequiredWorkflowAuthorCondition(condition, author string) (bool, error) {
+func evaluateWorkflowForkCondition(condition, repository, author string) (bool, error) {
 	terms := strings.Split(condition, "&&")
 	if len(terms) == 0 {
-		return false, fmt.Errorf("empty author condition")
+		return false, fmt.Errorf("empty workflow condition")
 	}
-	termPattern := regexp.MustCompile(`^github\.event\.pull_request\.user\.login\s*!=\s*'([^']+)'$`)
+	repositoryPattern := regexp.MustCompile(`^github\.repository\s*==\s*'([^']+)'$`)
+	authorPattern := regexp.MustCompile(`^github\.event\.pull_request\.user\.login\s*!=\s*'([^']+)'$`)
 	for _, term := range terms {
-		matches := termPattern.FindStringSubmatch(strings.TrimSpace(term))
-		if matches == nil {
-			return false, fmt.Errorf("unsupported author condition term %q", strings.TrimSpace(term))
-		}
-		if author == matches[1] {
-			return false, nil
+		term = strings.TrimSpace(term)
+		switch {
+		case repositoryPattern.MatchString(term):
+			if repository != repositoryPattern.FindStringSubmatch(term)[1] {
+				return false, nil
+			}
+		case authorPattern.MatchString(term):
+			if author == authorPattern.FindStringSubmatch(term)[1] {
+				return false, nil
+			}
+		default:
+			return false, fmt.Errorf("unsupported workflow condition term %q", term)
 		}
 	}
 	return true, nil
+}
+
+func TestForkWorkflowConditionsOnlyRunInCanonicalRepository(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "require no-mistakes", path: ".github/workflows/no-mistakes-required.yml"},
+		{name: "guard generated files", path: ".github/workflows/guard-generated-files.yml"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			condition := loadWorkflow(t, tc.path).Jobs["check"].If
+			for _, test := range []struct {
+				name       string
+				repository string
+				author     string
+				wantRun    bool
+			}{
+				{name: "canonical repository", repository: requiredWorkflowRepository, author: "human-contributor", wantRun: true},
+				{name: "fork repository", repository: "ironerumi/no-mistakes", author: "human-contributor", wantRun: false},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					got, err := evaluateWorkflowForkCondition(condition, test.repository, test.author)
+					if err != nil {
+						t.Fatalf("evaluate workflow condition: %v", err)
+					}
+					if got != test.wantRun {
+						t.Fatalf("job runs for repository %q and author %q = %t, want %t", test.repository, test.author, got, test.wantRun)
+					}
+				})
+			}
+		})
+	}
 }
 
 // TestNoMistakesRequiredWorkflowTriggersOnRelevantPREvents ensures the check
@@ -363,8 +404,12 @@ type requiredWorkflowResult struct {
 }
 
 func loadRequiredWorkflow(t *testing.T) requiredWorkflow {
+	return loadWorkflow(t, requiredWorkflowPath)
+}
+
+func loadWorkflow(t *testing.T, path string) requiredWorkflow {
 	t.Helper()
-	data, err := os.ReadFile(requiredWorkflowPath)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read workflow: %v", err)
 	}
@@ -490,8 +535,7 @@ func runRequiredWorkflowCheckJob(t *testing.T, workflow requiredWorkflow, event 
 	// identical verdict logic they always have, just reached via the live
 	// path instead of the archived one - matching what a real runner with
 	// this workflow's `permissions: pull-requests: read` actually does.
-	requiredWorkflowTestRepo := "kunchenguid/no-mistakes"
-	liveServer := stubPullsAPI(t, requiredWorkflowTestRepo, strconv.FormatInt(prNumber, 10), http.StatusOK, event.Body, headSHA)
+	liveServer := stubPullsAPI(t, requiredWorkflowRepository, strconv.FormatInt(prNumber, 10), http.StatusOK, event.Body, headSHA)
 
 	action := loadRequireAction(t, actionPath)
 	if action.Runs.Using != "composite" {
@@ -561,7 +605,7 @@ func runRequiredWorkflowCheckJob(t *testing.T, workflow requiredWorkflow, event 
 		"GITHUB_OUTPUT="+outputPath,
 		"GITHUB_TOKEN=test-token",
 		"GITHUB_API_URL="+liveServer.URL,
-		"GITHUB_REPOSITORY="+requiredWorkflowTestRepo,
+		"GITHUB_REPOSITORY="+requiredWorkflowRepository,
 	)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
