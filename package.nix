@@ -14,7 +14,7 @@ buildGoModule {
   inherit version;
 
   src = lib.cleanSource ./.;
-  vendorHash = "sha256-maAVBptEtdrGanJHwAPAmuGBorzIMUgK6T+NmIz1kS0=";
+  vendorHash = "sha256-E2TINSQpulrxXcWEbsabrEy4BN1DiPA7r0ItclpJ1h0=";
   subPackages = [ "cmd/no-mistakes" ];
 
   env.CGO_ENABLED = 0;

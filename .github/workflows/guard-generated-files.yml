@@ -26,6 +26,7 @@ jobs:
     # release-please owns CHANGELOG.md and .release-please-manifest.json; its PR
     # is the one legitimate place those files change, so we exempt its author.
     if: >-
+      github.repository == 'kunchenguid/no-mistakes' &&
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'release-please[bot]'
     steps:
