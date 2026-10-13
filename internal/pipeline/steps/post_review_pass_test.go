@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -119,6 +120,91 @@ func TestPushStep_PostReviewPassCoversPushsOwnLeftoverCommit(t *testing.T) {
 	}
 	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != approvedHead {
 		t.Fatalf("remote head = %s, want the reviewed head %s untouched", got, approvedHead)
+	}
+}
+
+func recordCompletedPostReviewPass(t *testing.T, sctx *pipeline.StepContext, head string) {
+	t.Helper()
+	review, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.CompleteStepWithStatus(review.ID, types.StepStatusCompleted, 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertReviewStepRound(review.ID, 1, db.RoundTriggerPostReview, nil, nil, head, 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A formatter is allowed to commit its own edits, but Push must record that
+// commit before handing it to Review. Once that pass completes, another
+// formatter commit is not a new pass opportunity: it must fail closed rather
+// than loop indefinitely.
+func TestPushStep_PostReviewPassFormatterCommitRecordsHeadAndRejectsRepeat(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		format     string
+		rejectNext bool
+	}{
+		{
+			name:   "ordinary pass publishes",
+			format: "echo formatted>formatter.txt && git add -A && git diff --cached --quiet || git commit -m formatter",
+		},
+		{
+			name:       "formatter keeps advancing after pass",
+			format:     "git rev-parse HEAD>formatter.txt && git add -A && git diff --cached --quiet || git commit -m formatter",
+			rejectNext: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sctx, dir, upstream, approvedHead := postReviewPushFixture(t)
+			sctx.Config.Review.PostReviewPass = true
+			sctx.Config.Commands.Format = tc.format
+
+			outcome, err := (&PushStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !outcome.PostReviewPass {
+				t.Fatal("formatter commit was published without a post-review pass")
+			}
+			formattedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+			if sctx.Run.HeadSHA != formattedHead {
+				t.Fatalf("run head = %s, want formatter commit %s recorded before the pass", sctx.Run.HeadSHA, formattedHead)
+			}
+			run, err := sctx.DB.GetRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.HeadSHA != formattedHead {
+				t.Fatalf("durable run head = %s, want formatter commit %s", run.HeadSHA, formattedHead)
+			}
+
+			recordReviewApproval(t, sctx, formattedHead)
+			recordCompletedPostReviewPass(t, sctx, formattedHead)
+			outcome, err = (&PushStep{}).Execute(sctx)
+			if tc.rejectNext {
+				if err == nil || !strings.Contains(err.Error(), "another post-review pass") {
+					t.Fatalf("bad formatter result = %v, want a clear no-loop refusal", err)
+				}
+				if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != approvedHead {
+					t.Fatalf("bad formatter changed remote head to %s, want reviewed head %s", got, approvedHead)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome.PostReviewPass {
+				t.Fatal("ordinary completed pass requested another pass")
+			}
+			if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != formattedHead {
+				t.Fatalf("ordinary pass published %s, want %s", got, formattedHead)
+			}
+		})
 	}
 }
 
