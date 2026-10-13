@@ -29,6 +29,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	ctx := sctx.Ctx
 	newHeadSHA := ""
+	formatterOwnChange := false
 	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 		return nil, err
 	}
@@ -36,6 +37,14 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 
 	// Run format command if configured (before committing, so changes are formatted).
 	if fmtCmd := sctx.Config.Commands.Format; fmtCmd != "" {
+		formatStartHead, err := git.HeadSHA(ctx, sctx.WorkDir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve head before formatter: %w", err)
+		}
+		formatStartStatus, err := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+		if err != nil {
+			return nil, fmt.Errorf("check worktree before formatter: %w", err)
+		}
 		if err := ensurePrepared(sctx, s.Name()); err != nil {
 			return nil, fmt.Errorf("prepare formatter dependencies: %w", err)
 		}
@@ -46,6 +55,16 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		} else if exitCode != 0 {
 			sctx.Log(fmt.Sprintf("warning: format command exited with code %d: %s", exitCode, output))
 		}
+		formatEndHead, err := git.HeadSHA(ctx, sctx.WorkDir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve head after formatter: %w", err)
+		}
+		formatEndStatus, err := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+		if err != nil {
+			return nil, fmt.Errorf("check worktree after formatter: %w", err)
+		}
+		formatterOwnChange = strings.TrimSpace(formatStartStatus) == "" &&
+			(formatStartHead != formatEndHead || strings.TrimSpace(formatEndStatus) != "")
 	}
 
 	// Commit any uncommitted changes from pipeline agents or the formatter. Test
@@ -84,7 +103,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before push: %w", err)
 	}
-	approvedHead, err := postReviewPassFrom(sctx, headBeingPushed)
+	approvedHead, err := postReviewPassFrom(sctx, headBeingPushed, formatterOwnChange)
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +406,7 @@ func updateGateMirrorAfterPush(ctx context.Context, sctx *pipeline.StepContext, 
 // that was skipped - by --skip, or by the operator at the pass's own gate - is a
 // person's explicit decision and asks for no pass; a missing approval is left
 // to assertReviewApprovedPushHead, which refuses the push.
-func postReviewPassFrom(sctx *pipeline.StepContext, headBeingPushed string) (string, error) {
+func postReviewPassFrom(sctx *pipeline.StepContext, headBeingPushed string, formatterOwnChange bool) (string, error) {
 	if sctx.Config == nil || !sctx.Config.Review.PostReviewPass {
 		return "", nil
 	}
@@ -412,21 +431,29 @@ func postReviewPassFrom(sctx *pipeline.StepContext, headBeingPushed string) (str
 			return "", nil
 		}
 	}
-	completed, err := completedPostReviewPass(sctx, steps)
+	postReviewPasses, err := completedPostReviewPasses(sctx, steps)
 	if err != nil {
 		return "", fmt.Errorf("load completed post-review pass before push: %w", err)
 	}
-	if completed {
-		return "", fmt.Errorf("refusing to request another post-review pass: completed pass approved head %s, but head to publish is %s", shortObjectID(approvedHead), shortObjectID(headBeingPushed))
+	if postReviewPasses > 0 {
+		if postReviewPasses >= 2 || !formatterOwnChange {
+			return "", fmt.Errorf("refusing to request another post-review pass: completed pass approved head %s, but head to publish is %s", shortObjectID(approvedHead), shortObjectID(headBeingPushed))
+		}
+		onlyFormatterCommit, err := isSingleFormatterCommitAfter(sctx, approvedHead, headBeingPushed)
+		if err != nil {
+			return "", fmt.Errorf("verify Push formatter commit before post-review pass: %w", err)
+		}
+		if !onlyFormatterCommit {
+			return "", fmt.Errorf("refusing to request another post-review pass: head %s is not exactly one Push formatter commit after approved head %s", shortObjectID(headBeingPushed), shortObjectID(approvedHead))
+		}
 	}
 	return approvedHead, nil
 }
 
-// completedPostReviewPass reports whether the current completed Review cycle
-// was opened by a post-review pass. A later formatter advance cannot owe a
-// second pass: the pass just completed is the final review handoff for this
-// Push execution.
-func completedPostReviewPass(sctx *pipeline.StepContext, steps []*db.StepResult) (bool, error) {
+// completedPostReviewPasses counts the completed post-review passes in the
+// Review row. Push may grant exactly one additional pass for its own formatter
+// commit, never a third pass or a pass for another kind of advancement.
+func completedPostReviewPasses(sctx *pipeline.StepContext, steps []*db.StepResult) (int, error) {
 	var review *db.StepResult
 	for _, step := range steps {
 		if step.StepName == types.StepReview {
@@ -435,21 +462,31 @@ func completedPostReviewPass(sctx *pipeline.StepContext, steps []*db.StepResult)
 		}
 	}
 	if review == nil || review.Status != types.StepStatusCompleted {
-		return false, nil
+		return 0, nil
 	}
 	rounds, err := sctx.DB.GetRoundsByStep(review.ID)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
-	for index := len(rounds) - 1; index >= 0; index-- {
-		switch rounds[index].Trigger {
-		case db.RoundTriggerPostReview:
-			return true, nil
-		case "initial":
-			return false, nil
+	passes := 0
+	for _, round := range rounds {
+		if round.Trigger == db.RoundTriggerPostReview {
+			passes++
 		}
 	}
-	return false, nil
+	return passes, nil
+}
+
+// isSingleFormatterCommitAfter proves that the only commit between the
+// approved head and the formatter-advanced head is the current Push commit.
+// A single-parent check rejects merges and any additional or unrelated commit.
+func isSingleFormatterCommitAfter(sctx *pipeline.StepContext, approvedHead, headBeingPushed string) (bool, error) {
+	parents, err := stepGitRun(sctx, "rev-list", "--parents", "-n", "1", headBeingPushed)
+	if err != nil {
+		return false, err
+	}
+	fields := strings.Fields(parents)
+	return len(fields) == 2 && strings.EqualFold(fields[1], approvedHead), nil
 }
 
 // assertReviewApprovedPushHead refuses to publish a head that is not the
