@@ -89,10 +89,11 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, err
 	}
 	if approvedHead != "" {
-		// Record the commit made above first, or the pass would review a range
-		// that stops short of it.
-		if newHeadSHA != "" {
-			if err := recordAgentFixHead(sctx, s.Name(), newHeadSHA); err != nil {
+		// Record the exact head the pass will review before re-entering Review.
+		// The formatter may have committed its own edits, so newHeadSHA is not
+		// the complete set of pipeline-owned head advances here.
+		if strings.TrimSpace(sctx.Run.HeadSHA) != headBeingPushed {
+			if err := recordAgentFixHead(sctx, s.Name(), headBeingPushed); err != nil {
 				return nil, err
 			}
 		}
@@ -411,7 +412,44 @@ func postReviewPassFrom(sctx *pipeline.StepContext, headBeingPushed string) (str
 			return "", nil
 		}
 	}
+	completed, err := completedPostReviewPass(sctx, steps)
+	if err != nil {
+		return "", fmt.Errorf("load completed post-review pass before push: %w", err)
+	}
+	if completed {
+		return "", fmt.Errorf("refusing to request another post-review pass: completed pass approved head %s, but head to publish is %s", shortObjectID(approvedHead), shortObjectID(headBeingPushed))
+	}
 	return approvedHead, nil
+}
+
+// completedPostReviewPass reports whether the current completed Review cycle
+// was opened by a post-review pass. A later formatter advance cannot owe a
+// second pass: the pass just completed is the final review handoff for this
+// Push execution.
+func completedPostReviewPass(sctx *pipeline.StepContext, steps []*db.StepResult) (bool, error) {
+	var review *db.StepResult
+	for _, step := range steps {
+		if step.StepName == types.StepReview {
+			review = step
+			break
+		}
+	}
+	if review == nil || review.Status != types.StepStatusCompleted {
+		return false, nil
+	}
+	rounds, err := sctx.DB.GetRoundsByStep(review.ID)
+	if err != nil {
+		return false, err
+	}
+	for index := len(rounds) - 1; index >= 0; index-- {
+		switch rounds[index].Trigger {
+		case db.RoundTriggerPostReview:
+			return true, nil
+		case "initial":
+			return false, nil
+		}
+	}
+	return false, nil
 }
 
 // assertReviewApprovedPushHead refuses to publish a head that is not the
