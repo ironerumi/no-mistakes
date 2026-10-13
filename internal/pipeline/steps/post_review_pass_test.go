@@ -149,7 +149,38 @@ func recordCompletedPostReviewPass(t *testing.T, sctx *pipeline.StepContext, hea
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(rounds) == 0 {
+		if _, err := sctx.DB.InsertReviewStepRound(review.ID, 1, "initial", nil, nil, head, 0); err != nil {
+			t.Fatal(err)
+		}
+		rounds = append(rounds, nil)
+	}
 	if _, err := sctx.DB.InsertReviewStepRound(review.ID, len(rounds)+1, db.RoundTriggerPostReview, nil, nil, head, 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func recordInitialReviewRound(t *testing.T, sctx *pipeline.StepContext, head string) {
+	t.Helper()
+	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var review *db.StepResult
+	for _, step := range steps {
+		if step.StepName == types.StepReview {
+			review = step
+			break
+		}
+	}
+	if review == nil {
+		t.Fatal("review step result is missing")
+	}
+	rounds, err := sctx.DB.GetRoundsByStep(review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertReviewStepRound(review.ID, len(rounds)+1, "initial", nil, nil, head, 0); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -189,6 +220,55 @@ func TestPushStep_PostReviewPassFormatterCommitRecordsHeadAndPublishes(t *testin
 	}
 	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got == approvedHead {
 		t.Fatal("formatter commit was not published")
+	}
+}
+
+// A CI repair restarts Review with a new initial round. Its later Document
+// commit must get a fresh post-review pass budget even when the formatter is a
+// no-op, rather than being blocked by the pass from the earlier cycle.
+func TestPushStep_PostReviewPassResetsAfterCIRepairReviewRestart(t *testing.T) {
+	t.Parallel()
+	sctx, dir, upstream, approvedHead := postReviewPushFixture(t)
+	sctx.Config.Review.PostReviewPass = true
+	sctx.Config.Commands.Format = "git diff --quiet"
+
+	firstDocumentHead := commitAfterReview(t, sctx, dir, "README.md", "# First delivery\n")
+	outcome, err := (&PushStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.PostReviewPass {
+		t.Fatal("the first Document commit was published without review")
+	}
+	recordReviewApproval(t, sctx, firstDocumentHead)
+	recordCompletedPostReviewPass(t, sctx, firstDocumentHead)
+
+	// This initial round is the durable boundary created when CI repair
+	// restarts the pipeline at Review. Document then makes the new edit.
+	recordInitialReviewRound(t, sctx, firstDocumentHead)
+	secondDocumentHead := commitAfterReview(t, sctx, dir, "README.md", "# Second delivery\n")
+
+	outcome, err = (&PushStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.PostReviewPass {
+		t.Fatal("the post-repair Document commit was not handed to Review")
+	}
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != approvedHead {
+		t.Fatalf("remote head = %s, want the pre-repair reviewed head %s untouched", got, approvedHead)
+	}
+
+	recordReviewApproval(t, sctx, secondDocumentHead)
+	outcome, err = (&PushStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.PostReviewPass {
+		t.Fatal("the reviewed post-repair edit requested another pass")
+	}
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != secondDocumentHead {
+		t.Fatalf("published head = %s, want the reviewed post-repair edit %s", got, secondDocumentHead)
 	}
 }
 
