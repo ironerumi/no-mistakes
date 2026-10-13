@@ -468,8 +468,17 @@ func completedPostReviewPasses(sctx *pipeline.StepContext, steps []*db.StepResul
 	if err != nil {
 		return 0, err
 	}
+	latestInitial := -1
+	for index, round := range rounds {
+		if round.Trigger == "initial" {
+			latestInitial = index
+		}
+	}
+	if latestInitial < 0 {
+		return 0, nil
+	}
 	passes := 0
-	for _, round := range rounds {
+	for _, round := range rounds[latestInitial+1:] {
 		if round.Trigger == db.RoundTriggerPostReview {
 			passes++
 		}
