@@ -285,7 +285,7 @@ Pushes the validated branch to the configured push target.
 - Without fork routing, successful run-start validation selects the upstream URL from the working clone; when it matches the gate worktree's `origin`, the worktree URL is used so embedded credentials retained outside the database can authenticate. If validation fails, the run continues with its prior routing.
 - With GitHub fork routing, the push target is `repos.fork_url`
 - Immediately before remote mutation, reloads the durable review-approved commit and refuses to push when that binding is missing, malformed, or unreachable
-- Requires the commit proposed for push to equal or descend from the review-approved commit, allowing commits made by later pipeline steps without authorizing unrelated history
+- After any required post-review pass completes (or when the opt-in is off), requires the commit proposed for push to equal or descend from the review-approved commit, allowing later pipeline commits without authorizing unrelated history
 - Re-reads the push target via `git ls-remote` before pushing
 - Before pushing a non-base branch, refreshes an existing PR attestation using the [pre-push attestation protocol](#pipeline-step-attestation), which owns provider coverage, snapshot selection, and failure behavior.
 - For existing branches, refuses to force-push when the live remote carries commits the pipeline has not incorporated by patch-id
