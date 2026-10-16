@@ -8,6 +8,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -44,6 +45,19 @@ func pushUntilReviewed(calls *int) *adaptiveCallStep {
 		}
 		return &StepOutcome{}, nil
 	}}
+}
+
+func recoveredGateReady(runID string, stepName types.StepName) (<-chan struct{}, EventFunc) {
+	ready := make(chan struct{}, 1)
+	return ready, func(event ipc.Event) {
+		if event.Type != ipc.EventStepCompleted || event.RunID != runID || event.StepName == nil || *event.StepName != stepName || event.Status == nil || *event.Status != string(types.StepStatusAwaitingApproval) {
+			return
+		}
+		select {
+		case ready <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func roundTriggers(t *testing.T, database *db.DB, stepResultID string) []string {
@@ -218,16 +232,18 @@ func TestExecutor_RecoveredPostReviewPassResumesAtPush(t *testing.T) {
 		return &StepOutcome{}, nil
 	}}
 	steps := []Step{review, test, moveHeadStep(types.StepDocument, postReviewDocumentHead, &documentCalls), pushUntilReviewed(&pushCalls)}
-	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, steps, nil)
+	gateReady, onEvent := recoveredGateReady(run.ID, types.StepReview)
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, steps, onEvent)
 
 	done := make(chan error, 1)
 	go func() { done <- exec.Resume(context.Background(), run, repo, t.TempDir()) }()
-	deadline := time.Now().Add(5 * time.Second)
-	for exec.Respond(types.StepReview, types.ActionFix, []string{"r1"}) != nil {
-		if time.Now().After(deadline) {
-			t.Fatal("recovered post-review gate never accepted a response")
-		}
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-gateReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovered post-review gate never became ready")
+	}
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"r1"}); err != nil {
+		t.Fatalf("respond to recovered post-review gate: %v", err)
 	}
 	select {
 	case err := <-done:
@@ -335,16 +351,18 @@ func TestExecutor_RecoveredPostReviewPassWithSkippedStepsResumesAtPush(t *testin
 		neverRun(types.StepLint, &lintCalls),
 		pushUntilReviewed(&pushCalls),
 	}
-	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, steps, nil)
+	gateReady, onEvent := recoveredGateReady(run.ID, types.StepReview)
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, steps, onEvent)
 
 	done := make(chan error, 1)
 	go func() { done <- exec.Resume(context.Background(), run, repo, t.TempDir()) }()
-	deadline := time.Now().Add(5 * time.Second)
-	for exec.Respond(types.StepReview, types.ActionFix, []string{"r1"}) != nil {
-		if time.Now().After(deadline) {
-			t.Fatal("recovered post-review gate never accepted a response")
-		}
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-gateReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovered post-review gate never became ready")
+	}
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"r1"}); err != nil {
+		t.Fatalf("respond to recovered post-review gate: %v", err)
 	}
 	select {
 	case err := <-done:
