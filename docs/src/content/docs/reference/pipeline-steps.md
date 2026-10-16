@@ -187,9 +187,9 @@ With trusted [`review.post_review_pass: true`](/no-mistakes/reference/repo-confi
 
 - The base commit is the review-approved commit, so the reviewable set and the coverage contract are the files those commits changed. The prompt tells the reviewer the commits are pipeline-authored and that the approved change is context only.
 - Findings, the gate, and `auto_fix.review` rounds work as in any review. The pass starts a fresh outstanding set and shares the step's `auto_fix.review` budget, as a restart at Review does. Its first round is recorded with trigger `post_review` and labelled in the PR body's Review details.
-- When the pass completes, clean or approved at its gate, the review-approved commit advances to the head it reviewed and Push runs again from the top; a commit that run makes gets a pass of its own. Skipping a parked post-review pass publishes without it, and aborting fails the run. Skipping Review before any approval still leaves Push without an approval binding, so Push fails closed.
+- When the pass completes, clean or approved at its gate, the review-approved commit advances to the head it reviewed and Push runs again from the top. Later advances normally fail closed rather than starting an unbounded second pass. The one bounded exception is a clean-start, single-parent commit made by Push's formatter immediately after a completed pass: it may receive one additional pass; a third pass or an unrelated or multi-commit advance fails closed. Skipping a parked post-review pass publishes without it, and aborting fails the run. Skipping Review before any approval still leaves Push without an approval binding, so Push fails closed.
 - Test, Document, and Lint are not re-run and the step order is unchanged. A daemon restart while the pass is parked resumes the pass and then Push.
-- CI repairs made after publication are outside the pass; [`ci.revalidate_repairs`](/no-mistakes/reference/repo-config/#cirevalidate_repairs) governs them.
+- CI repairs made after publication are outside this pass; [`ci.revalidate_repairs`](/no-mistakes/reference/repo-config/#cirevalidate_repairs) governs whether they restart validation. A CI-repair restart at Review begins a new review cycle, so later commits in that cycle receive a fresh post-review-pass budget.
 
 ### Pipeline HEAD continuity
 
