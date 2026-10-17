@@ -997,6 +997,7 @@ func logCIMonitorStatus(sctx *pipeline.StepContext, message string, previous ciM
 		}
 		if message != previous.logged || pending {
 			sctx.Log(message)
+
 		}
 	}
 	return ciMonitorStatus{persisted: message, logged: message}, nil
@@ -1022,6 +1023,7 @@ func clearCIMonitorReady(sctx *pipeline.StepContext) error {
 		sctx.Log(fmt.Sprintf("warning: could not clear CI readiness: %v", err))
 	}
 	return nil
+
 }
 
 func setCIMonitorPRState(sctx *pipeline.StepContext, state string) error {

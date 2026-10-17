@@ -2350,7 +2350,6 @@ func (m *RunManager) handoffPending(runID string) bool {
 	defer m.mu.Unlock()
 	return m.handoffRequests[runID] != nil
 }
-
 func (m *RunManager) ciWake(runID string) <-chan struct{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
