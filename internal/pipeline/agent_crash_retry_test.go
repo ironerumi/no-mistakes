@@ -375,6 +375,7 @@ func TestRetryableAgentCrash(t *testing.T) {
 		{"shared invocation cause", &agentInvocationFailure{err: errors.New("exit status 1")}, false, true},
 		{"unclassified error", errors.New("exit status 1"), false, false},
 		{"unparseable", agent.RejectStructuredOutput(errors.New("invalid JSON")), false, true},
+		{"structured output field names", &agentInvocationFailure{err: agent.RejectStructuredOutput(errors.New(`structured output: {"author":"token"}`))}, false, true},
 		{"auth", &agentInvocationFailure{err: errors.New("provider authentication failed")}, false, false},
 		{"login", &agentInvocationFailure{err: errors.New("login required")}, false, false},
 		{"api key", &agentInvocationFailure{err: errors.New("invalid API key")}, false, false},

@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -33,32 +32,20 @@ func retryableAgentCrash(ctx context.Context, err error, configuredTimeouts bool
 		(!errors.Is(err, ErrAgentInvocationFailed) && !agent.IsStructuredOutputRejected(err)) {
 		return false
 	}
-	// Adapters do not yet share a typed permanent-provider-error contract.
-	// Refuse ambiguous authentication, access, quota and usage-limit signals
-	// rather than spending another invocation. False negatives fail normally.
-	message := strings.ToLower(err.Error())
-	if budgetCut != nil && budgetCut.adapter != nil {
-		// The timeout's displayed adapter report is bounded. Classification
-		// must still see a permanent signal beyond that diagnostic boundary.
-		message += "\n" + strings.ToLower(budgetCut.adapter.Error())
-	}
 	if agent.IsUsageLimitReached(err) {
 		return false
 	}
-	for _, terminal := range []string{
-		"auth", "unauthorized", "forbidden", "permission denied", "access denied", "401", "403",
-		"api key", "api_key", "token", "login", "log in", "sign in", "credential",
-		"quota", "freeusagelimit", "free usage limit", "free_usage_limit", "usage limit", "usage_limit",
-		"credit", "billing", "payment", "balance", "402",
-		"session limit",
-		// Claude owns its structured-output retries; never stack another loop.
-		"error_max_structured_output_retries",
-	} {
-		if strings.Contains(message, terminal) {
-			return false
-		}
+	if agent.IsStructuredOutputRejected(err) {
+		return true
 	}
-	return true
+	if budgetCut != nil && budgetCut.adapter != nil {
+		return !agent.IsTerminalProviderError(budgetCut.adapter)
+	}
+	var invocationFailure *agentInvocationFailure
+	if errors.As(err, &invocationFailure) {
+		return !agent.IsTerminalProviderError(invocationFailure.err)
+	}
+	return !agent.IsTerminalProviderError(err)
 }
 
 // CheckAgentCrashRetryBase binds the actual diff base at the shared resolver,
