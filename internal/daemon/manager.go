@@ -51,6 +51,7 @@ type RunManager struct {
 	cancels       map[string]context.CancelCauseFunc // runID → cancel function with cause
 	dones         map[string]chan struct{}           // runID → closed when goroutine exits
 	handoffClaims map[string]bool                    // runIDs atomically claimed for handoff
+	ciWakes       map[string]chan struct{}           // runID → CI poll wake signal
 	wg            sync.WaitGroup                     // tracks background run goroutines
 	shuttingDown  atomic.Bool                        // prevents new runs during shutdown
 
@@ -95,6 +96,7 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		cancels:       make(map[string]context.CancelCauseFunc),
 		dones:         make(map[string]chan struct{}),
 		handoffClaims: make(map[string]bool),
+		ciWakes:       make(map[string]chan struct{}),
 		db:            database,
 		paths:         p,
 		steps:         stepFactory,
@@ -418,6 +420,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
 	executor.SetCIObservationTransition(m.transitionCIObservation)
 	executor.SetCIHandoffValidator(m.handoffClaimValid)
+	executor.SetCIWake(m.ciWake)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -431,6 +434,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	m.executors[plan.run.ID] = executor
 	m.cancels[plan.run.ID] = cancel
 	m.dones[plan.run.ID] = done
+	m.ciWakes[plan.run.ID] = make(chan struct{}, 1)
 	m.mu.Unlock()
 
 	m.wg.Add(1)
@@ -464,6 +468,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			delete(m.cancels, plan.run.ID)
 			delete(m.dones, plan.run.ID)
 			delete(m.handoffClaims, plan.run.ID)
+			delete(m.ciWakes, plan.run.ID)
 			m.mu.Unlock()
 		}()
 
@@ -1755,6 +1760,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
 	executor.SetCIObservationTransition(m.transitionCIObservation)
 	executor.SetCIHandoffValidator(m.handoffClaimValid)
+	executor.SetCIWake(m.ciWake)
 	executor.SetForgeContext(forgeCtx)
 	executor.SetSkippedSteps(skipSteps)
 	if retry != nil {
@@ -1774,6 +1780,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	m.executors[run.ID] = executor
 	m.cancels[run.ID] = cancel
 	m.dones[run.ID] = done
+	m.ciWakes[run.ID] = make(chan struct{}, 1)
 	m.mu.Unlock()
 
 	// Background goroutine now owns worktree cleanup.
@@ -1832,6 +1839,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			delete(m.cancels, run.ID)
 			delete(m.dones, run.ID)
 			delete(m.handoffClaims, run.ID)
+			delete(m.ciWakes, run.ID)
 			m.mu.Unlock()
 		}()
 
@@ -2271,7 +2279,7 @@ func (m *RunManager) HandleCancel(runID string) error {
 	return nil
 }
 
-func (m *RunManager) transitionCIObservation(runID string, withdrawal bool, persist func() error) error {
+func (m *RunManager) transitionCIObservation(runID string, withdrawal, completes bool, persist func() error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.handoffClaims != nil && m.handoffClaims[runID] {
@@ -2279,9 +2287,17 @@ func (m *RunManager) transitionCIObservation(runID string, withdrawal bool, pers
 			delete(m.handoffClaims, runID)
 			return persist()
 		}
-		return pipeline.ErrHandoff
+		if completes {
+			return pipeline.ErrHandoff
+		}
 	}
 	return persist()
+}
+
+func (m *RunManager) ciWake(runID string) <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ciWakes[runID]
 }
 
 func (m *RunManager) handoffClaimValid(runID string) bool {
@@ -2319,6 +2335,12 @@ func (m *RunManager) HandleHandoff(runID string) error {
 				m.handoffClaims = make(map[string]bool)
 			}
 			m.handoffClaims[runID] = true
+			if wake := m.ciWakes[runID]; wake != nil {
+				select {
+				case wake <- struct{}{}:
+				default:
+				}
+			}
 			return nil
 		}
 	}

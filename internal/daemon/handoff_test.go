@@ -61,7 +61,7 @@ func TestHandleHandoffRefusesReadinessWithdrawnDuringTransition(t *testing.T) {
 	releaseWithdraw := make(chan struct{})
 	withdrawDone := make(chan error, 1)
 	go func() {
-		withdrawDone <- m.transitionCIObservation(run.ID, true, func() error {
+		withdrawDone <- m.transitionCIObservation(run.ID, true, false, func() error {
 			close(withdrawStarted)
 			<-releaseWithdraw
 			return database.SetRunCIReady(run.ID, false)
@@ -126,7 +126,7 @@ func TestHandleHandoffRevokedByPRClose(t *testing.T) {
 	defer cancel(context.Canceled)
 	m.cancels[run.ID] = cancel
 	must(m.HandleHandoff(run.ID))
-	if err := m.transitionCIObservation(run.ID, true, func() error {
+	if err := m.transitionCIObservation(run.ID, true, false, func() error {
 		return database.UpdateRunPRState(run.ID, "closed")
 	}); err != nil {
 		t.Fatal(err)
@@ -198,6 +198,8 @@ func TestHandleHandoffRequiresGreenOpenPRMonitor(t *testing.T) {
 			m := NewRunManager(database, p, nil)
 			ctx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(context.Canceled)
+			wake := make(chan struct{}, 1)
+			m.ciWakes[run.ID] = wake
 			if mode != "no-monitor" {
 				m.cancels[run.ID] = cancel
 			}
@@ -214,16 +216,29 @@ func TestHandleHandoffRequiresGreenOpenPRMonitor(t *testing.T) {
 				if ctx.Err() != nil {
 					t.Fatal("handoff cancelled the monitor before its next observation")
 				}
+				select {
+				case <-wake:
+				default:
+					t.Fatal("handoff did not wake the CI monitor")
+				}
 				persisted := false
-				err := m.transitionCIObservation(run.ID, false, func() error {
+				err := m.transitionCIObservation(run.ID, false, false, func() error {
+					persisted = true
+					return nil
+				})
+				if err != nil || !persisted {
+					t.Fatalf("open PR observation = %v, persisted=%t; want persisted without handoff", err, persisted)
+				}
+				persisted = false
+				err = m.transitionCIObservation(run.ID, false, true, func() error {
 					persisted = true
 					return nil
 				})
 				if !errors.Is(err, pipeline.ErrHandoff) {
-					t.Fatalf("handoff observation error = %v", err)
+					t.Fatalf("green readiness observation error = %v", err)
 				}
 				if persisted {
-					t.Fatal("monitor observation crossed an atomic handoff claim")
+					t.Fatal("monitor readiness observation crossed an atomic handoff claim")
 				}
 			} else {
 				if err == nil || !strings.Contains(err.Error(), "axi ") {

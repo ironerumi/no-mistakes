@@ -101,8 +101,9 @@ type Executor struct {
 	// ciObservationTransition wraps CI readiness and PR-state writes at a
 	// daemon-owned synchronization boundary. It is nil in standalone executor
 	// embeddings.
-	ciObservationTransition func(runID string, withdrawal bool, persist func() error) error
+	ciObservationTransition func(runID string, withdrawal, completes bool, persist func() error) error
 	ciHandoffValid          func(runID string) bool
+	ciWake                  func(runID string) <-chan struct{}
 }
 
 // SetOnPRMerged registers a best-effort hook invoked after a merged PR state
@@ -117,11 +118,18 @@ func (e *Executor) SetOnPRMerged(fn func(context.Context, string)) {
 // SetCIObservationTransition serializes CI observations with daemon
 // lifecycle decisions. The transition owns the persist callback's critical
 // section; standalone executors use the direct DB path instead.
-func (e *Executor) SetCIObservationTransition(fn func(runID string, withdrawal bool, persist func() error) error) {
+func (e *Executor) SetCIObservationTransition(fn func(runID string, withdrawal, completes bool, persist func() error) error) {
 	if e == nil {
 		return
 	}
 	e.ciObservationTransition = fn
+}
+
+func (e *Executor) SetCIWake(fn func(runID string) <-chan struct{}) {
+	if e == nil {
+		return
+	}
+	e.ciWake = fn
 }
 
 func (e *Executor) SetCIHandoffValidator(fn func(runID string) bool) {
@@ -1335,6 +1343,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// and the recorded evidence name the same round.
 		stepAgent = &roundStampingAgent{inner: stepAgent, round: func() int { return roundNum + 1 }}
 	}
+	var ciWake <-chan struct{}
+	if e.ciWake != nil {
+		ciWake = e.ciWake(run.ID)
+	}
 	ciReady := run.CIReadyAt != nil
 	ciReadyNoCI := run.CIReadyNoCI
 	ciReadinessChanged := func(ready, declaredNoCI bool) {
@@ -1388,6 +1400,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			touchLogActivity(text, true)
 		},
 		CIReadinessChanged: ciReadinessChanged,
+		CIWake:             ciWake,
 		MarkRunning:        markRunning,
 		OnPRMerged:         e.onPRMerged,
 	}
@@ -1403,7 +1416,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			return nil
 		}
 		if e.ciObservationTransition != nil {
-			return e.ciObservationTransition(run.ID, !ready, persist)
+			return e.ciObservationTransition(run.ID, !ready, ready, persist)
 		}
 		return persist()
 	}
@@ -1412,7 +1425,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			return e.db.UpdateRunPRState(run.ID, state)
 		}
 		if e.ciObservationTransition != nil {
-			return e.ciObservationTransition(run.ID, state != "open", persist)
+			return e.ciObservationTransition(run.ID, state != "open", false, persist)
 		}
 		return persist()
 	}

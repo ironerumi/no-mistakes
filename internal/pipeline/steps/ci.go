@@ -487,7 +487,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 		return ciTerminalRepairOutcome(outcome, Findings{}, sctx.DeferredFindings), nil
 	}
-	waitForPoll := func() error {
+	logStatus := func(message string) error {
+		var err error
+		lastMonitorLog, err = logCIMonitorStatus(sctx, message, lastMonitorLog)
+		return err
+	}
+	waitForPoll := func() (bool, error) {
 		interval := s.pollIntervalOverride
 		if interval == 0 {
 			interval = pollInterval(now().Sub(started))
@@ -498,18 +503,19 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				interval = remaining
 			}
 		}
-		waitForNextPoll := s.waitForNextPoll
-		if waitForNextPoll == nil {
-			waitForNextPoll = func(ctx context.Context, interval time.Duration) error {
-				select {
-				case <-time.After(interval):
-					return nil
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
+		if s.waitForNextPoll != nil {
+			return false, s.waitForNextPoll(ctx, interval)
 		}
-		return waitForNextPoll(ctx, interval)
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return false, nil
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-sctx.CIWake:
+			return true, nil
+		}
 	}
 
 	for {
@@ -631,7 +637,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				// the wait, and the readiness signal is cleared because the
 				// previous observation was for a different head.
 				consecutiveCheckErrs = 0
-				lastMonitorLog = logCIMonitorStatus(sctx, fmt.Sprintf("%s%v", cimonitor.ChecksHeadWaitingPrefix, err), lastMonitorLog)
+				if err := logStatus(fmt.Sprintf("%s%v", cimonitor.ChecksHeadWaitingPrefix, err)); err != nil {
+					return nil, err
+				}
 			} else {
 				clearCIMonitorReady(sctx)
 				lastMonitorLog = ""
@@ -756,7 +764,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				// previous passed-checks signal, which matters for a cancelled
 				// check: it never counted as a failing check, so nothing above
 				// cleared it.
-				lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+				if err := logStatus(ciChecksRunningMsg); err != nil {
+					return nil, err
+				}
 			} else if hasIssues && checksPending {
 				// Issue handling waits only for checks that can still complete on
 				// their own. A cancelled check whose rerun budget is exhausted must
@@ -821,7 +831,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// and unknown checks must never be promoted as green.
 					// Applies even when no_ci is declared: registered checks are
 					// never waived.
-					lastMonitorLog = logCIMonitorStatus(sctx, ciWaitingMessage(checks), lastMonitorLog)
+					if err := logStatus(ciWaitingMessage(checks)); err != nil {
+						return nil, err
+					}
 				case len(checks) == 0 && (sctx.Config == nil || !sctx.Config.NoCI):
 					// Empty forge results are ready ONLY with positive durable
 					// evidence from trusted default-branch config (no_ci: true).
@@ -876,7 +888,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 							if resolved {
 								behindBaseTip = tip
 							}
-							lastMonitorLog = logCIMonitorStatus(sctx, ciBehindBaseMsg, lastMonitorLog)
+							if err := logStatus(ciBehindBaseMsg); err != nil {
+								return nil, err
+							}
 							break
 						}
 						clearCIMonitorReady(sctx)
@@ -890,10 +904,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					if len(checks) == 0 {
 						passedMsg = ciNoChecksPassedMsg
 					}
-					lastMonitorLog = logCIMonitorStatus(sctx, passedMsg, lastMonitorLog)
+					if err := logStatus(passedMsg); err != nil {
+						return nil, err
+					}
 				default:
 					clearCIMonitorReady(sctx)
-					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+					if err := logStatus(ciChecksRunningMsg); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
@@ -904,8 +922,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		if !behindObserved {
 			behindBaseTip = ""
 		}
-		if err := waitForPoll(); err != nil {
+		woken, err := waitForPoll()
+		if err != nil {
 			return nil, err
+		}
+		if woken {
+			lastMonitorLog = ""
 		}
 	}
 }
@@ -922,16 +944,19 @@ func ciWaitingMessage(checks []scm.Check) string {
 	return ciChecksRunningMsg
 }
 
-func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) string {
+func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) (string, error) {
 	if message != previous {
 		ready := message == ciChecksPassedMsg || message == ciNoChecksPassedMsg
 		declaredNoCI := message == ciNoChecksPassedMsg
 		if err := setCIMonitorReadiness(sctx, ready, declaredNoCI); err != nil {
+			if errors.Is(err, pipeline.ErrHandoff) {
+				return previous, err
+			}
 			sctx.Log(fmt.Sprintf("warning: could not persist CI readiness: %v", err))
 		}
 		sctx.Log(message)
 	}
-	return message
+	return message, nil
 }
 
 func clearCIMonitorReady(sctx *pipeline.StepContext) {
