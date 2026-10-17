@@ -2358,7 +2358,7 @@ func (m *RunManager) HandleHandoff(ctx context.Context, runID string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("handoff requires an open PR with checks-passed; use axi run to wait for green CI, or axi abort to discard the run")
 	}
-	if run.PRState != nil && *run.PRState != "open" {
+	if run.PRState == nil || *run.PRState != "open" {
 		m.mu.Unlock()
 		return fmt.Errorf("handoff requires an open PR with checks-passed; use axi run to wait for green CI, or axi abort to discard the run")
 	}
