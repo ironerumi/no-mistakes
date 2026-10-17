@@ -198,15 +198,20 @@ var transientNeedles = []struct {
 	{"split bare json objects could not be fused into one valid object", "unfused split bare JSON objects"},
 }
 
-var terminalProviderErrorRE = regexp.MustCompile(`(?i)(?:\b(?:auth|authentication(?:_error)?|unauthorized|forbidden|credential|login|sign[ _-]?in)\b|\b(?:permission|access) denied\b|\bapi[ _-]?key\b|\b(?:invalid|expired|missing) token\b|\b(?:401|402|403)\b|\b(?:quota|credit|billing|payment|balance)\b|\bsession[ _-]?limit\b|\busage[ _-]?limit\b|\berror_max_structured_output_retries\b|\b(?:freeusagelimit|free[ _]usage[ _]limit|insufficient[ _]quota|quota[ _]exceeded|quota[ _]exhausted|exceeded your current quota)\b)`)
-
-// IsTerminalProviderError reports whether an adapter error is terminal.
-func IsTerminalProviderError(err error) bool {
-	return err != nil && isTerminalProviderErrorText(err.Error())
-}
-
-func isTerminalProviderErrorText(msg string) bool {
-	return terminalProviderErrorRE.MatchString(msg)
+var terminalNeedles = []struct {
+	needle string
+	label  string
+}{
+	{"freeusagelimit", "free usage limit"},
+	{"free usage limit", "free usage limit"},
+	{"free_usage_limit", "free usage limit"},
+	{"insufficient quota", "insufficient quota"},
+	{"insufficient_quota", "insufficient quota"},
+	{"exceeded your current quota", "quota exceeded"},
+	{"quota exceeded", "quota exceeded"},
+	{"quota_exceeded", "quota exceeded"},
+	{"quota exhausted", "quota exhausted"},
+	{"quota_exhausted", "quota exhausted"},
 }
 
 // classifyTransient reports whether an error message looks like a transient
@@ -256,9 +261,31 @@ func classifyTransient(err error) (string, bool) {
 }
 
 func isPiPermanentStderr(stderr string) bool {
-	return isTerminalProviderErrorText(stderr)
+	for _, sig := range terminalNeedles {
+		if strings.Contains(stderr, sig.needle) {
+			return true
+		}
+	}
+	for _, needle := range []string{
+		"permission denied",
+		"authentication",
+		"unauthorized",
+		"forbidden",
+		"401",
+		"403",
+	} {
+		if strings.Contains(stderr, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func isTerminalRetryError(msg string) bool {
-	return isTerminalProviderErrorText(msg)
+	for _, sig := range terminalNeedles {
+		if strings.Contains(msg, sig.needle) {
+			return true
+		}
+	}
+	return false
 }
