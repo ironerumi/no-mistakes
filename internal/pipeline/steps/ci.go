@@ -33,8 +33,8 @@ const (
 	ciBehindBaseMsg             = cimonitor.BehindBaseMsg
 )
 
-// CIStep monitors an open PR until it is merged, closed, or its configured idle
-// timeout elapses, and repairs CI failures through the executor's shared
+// CIStep monitors an open PR until it is merged, closed, explicitly handed off,
+// or its configured idle timeout elapses, and repairs CI failures through the executor's shared
 // findings machinery.
 //
 // Execute has the same shape as the review step's: when the executor
