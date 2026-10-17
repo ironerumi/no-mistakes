@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -52,11 +53,15 @@ func retryableAgentCrash(ctx context.Context, err error, configuredTimeouts bool
 		// must still see a permanent signal beyond that diagnostic boundary.
 		message += "\n" + strings.ToLower(budgetCut.adapter.Error())
 	}
+	if agent.IsUsageLimitReached(err) {
+		return false
+	}
 	for _, terminal := range []string{
 		"auth", "unauthorized", "forbidden", "permission denied", "access denied", "401", "403",
 		"api key", "api_key", "token", "login", "log in", "sign in", "credential",
 		"quota", "freeusagelimit", "free usage limit", "free_usage_limit", "usage limit", "usage_limit",
 		"credit", "billing", "payment", "balance", "402",
+		"session limit",
 		// Claude owns its structured-output retries; never stack another loop.
 		"error_max_structured_output_retries",
 	} {

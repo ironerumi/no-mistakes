@@ -90,6 +90,16 @@ func IsStructuredOutputRejected(err error) bool {
 	return errors.As(err, &rejection) && rejection.StructuredOutputRejected()
 }
 
+// IsUsageLimitReached reports the adapter's terminal usage-limit signal. The
+// signal remains matchable through pipeline error wrappers, even when a
+// timeout diagnostic bounds the adapter's displayed error text.
+func IsUsageLimitReached(err error) bool {
+	var limit interface {
+		UsageLimitReached() bool
+	}
+	return errors.As(err, &limit) && limit.UsageLimitReached()
+}
+
 type structuredOutputRejection struct{ err error }
 
 func (e *structuredOutputRejection) Error() string                { return e.err.Error() }
