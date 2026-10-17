@@ -116,6 +116,8 @@ func outcomeFor(status string) string {
 		return "failed"
 	case types.RunCancelled:
 		return "cancelled"
+	case types.RunHandedOff:
+		return "handed-off"
 	case types.RunCIMonitorInterrupted:
 		return "ci-monitor-interrupted"
 	default:
@@ -1407,10 +1409,13 @@ func renderDriveResultForRun(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool,
 		fields = append(fields, toon.Field{Key: "error", Value: *run.Error})
 	}
 
-	if rv.Status == string(types.RunCompleted) {
+	if rv.Status == string(types.RunCompleted) || rv.Status == string(types.RunHandedOff) {
 		fixes := rv.fixRows()
 		fields = appendFixesField(fields, fixes)
 		var help []string
+		if rv.Status == string(types.RunHandedOff) {
+			help = append(help, "Green CI monitoring ended explicitly for human review; the PR remains open and was not merged or cancelled.")
+		}
 		if rv.CIOverrideReason != "" {
 			help = append(help, fmt.Sprintf("A human approved past a live CI failure: %s", rv.CIOverrideReason))
 		}

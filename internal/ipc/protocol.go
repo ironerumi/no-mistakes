@@ -32,6 +32,7 @@ const (
 	MethodRespond                   = "respond"
 	MethodAnswerReview              = "answer_review_question"
 	MethodCancelRun                 = "cancel_run"
+	MethodHandoffRun                = "handoff_run"
 	MethodGateContext               = "gate_context"
 	MethodAdmitPush                 = "admit_push"
 	MethodHealth                    = "health"

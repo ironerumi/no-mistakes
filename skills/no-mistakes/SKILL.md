@@ -411,7 +411,8 @@ commits or changes no Test turn validated. Approval is rejected, so `--yes`
 stops at that gate without responding. Relay what the finding names and do
 not skip Test, which would publish that work. Ask the operator to choose:
 `--action fix` spends another agent budget to validate the work, and
-`no-mistakes axi abort` stops the run.
+`no-mistakes axi handoff` ends the current branch's green CI monitor when its open PR is handed to human reviewers. It requires authoritative `checks-passed` readiness and records terminal `handed_off`, without merging or closing the PR. Before green, resolve the checks or gates with `axi run` instead.
+`no-mistakes axi abort` stops and cancels a discarded run; its behavior is unchanged.
 
 ## Inspecting state
 
@@ -423,6 +424,7 @@ no-mistakes axi sync          # apply only an offered guarded synchronization
 no-mistakes axi sync --recover  # return custody after a terminal run left unpublished pipeline commits
 no-mistakes axi sync --adopt-published  # adopt an exactly published rebased head into its stale gate lane
 no-mistakes axi logs --step <name> --full   # one step's recorded findings, complete summary, and full log
+no-mistakes axi handoff       # end green CI monitoring for human review (handed_off, PR stays open)
 no-mistakes axi abort         # cancel the current-branch active run
 no-mistakes axi abort --run <id>   # cancel a specific run by id (works outside its worktree)
 no-mistakes axi respond --run <id> --action approve   # answer a specific run's parked gate by id (works outside its worktree)
@@ -459,6 +461,6 @@ Read the `action` column per row: decide `r1` (auto-fix) on your own
 judgment - `respond --action fix --findings r1` hands it to the pipeline to
 fix - but stop and escalate `r2` (ask-user) to the user before responding. A
 final state
-instead shows `outcome: <checks-passed|passed|passed-with-override|passed-with-skips|failed|cancelled>` with no
+instead shows `outcome: <checks-passed|passed|passed-with-override|passed-with-skips|handed-off|failed|cancelled>` with no
 `findings` table. Field names and exact columns can vary by step and version,
 so read the actual `findings` header rather than assuming this layout.

@@ -2263,6 +2263,35 @@ func (m *RunManager) HandleCancel(runID string) error {
 	return nil
 }
 
+// HandleHandoff ends only an actively monitoring, green, open-PR run. Readiness
+// is the monitor's authoritative persisted observation, never inferred from logs.
+func (m *RunManager) HandleHandoff(runID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cancel, ok := m.cancels[runID]
+	if !ok {
+		return fmt.Errorf("no active CI monitor for run %s; use axi status to inspect the run", runID)
+	}
+	run, err := m.db.GetRun(runID)
+	if err != nil {
+		return err
+	}
+	if run == nil || run.Status != types.RunRunning || run.CIReadyAt == nil || run.PRURL == nil || strings.TrimSpace(*run.PRURL) == "" || run.PRState == nil || *run.PRState != "open" {
+		return fmt.Errorf("handoff requires an open PR with checks-passed; use axi run to wait for green CI, or axi abort to discard the run")
+	}
+	steps, err := m.db.GetStepsByRun(runID)
+	if err != nil {
+		return err
+	}
+	for _, step := range steps {
+		if step.StepName == types.StepCI && step.Status == types.StepStatusRunning {
+			cancel(pipeline.ErrHandoff)
+			return nil
+		}
+	}
+	return fmt.Errorf("handoff requires an actively monitoring green CI step; use axi run to resolve gates, or axi abort to discard the run")
+}
+
 // cancelActiveRuns cancels any in-progress runs for the given repo+branch
 // and waits for their goroutines to finish before returning, preventing
 // concurrent pushes to upstream.
