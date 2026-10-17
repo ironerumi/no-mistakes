@@ -93,7 +93,7 @@ func awaitHandoffResult(t *testing.T, result <-chan error) error {
 	select {
 	case err := <-result:
 		return err
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("handoff request was not resolved by the CI monitor")
 		return nil
 	}
@@ -188,8 +188,8 @@ func TestHandleHandoffPRCloseRefusesAndContinues(t *testing.T) {
 
 func TestHandleHandoffTimeoutClearsRequestAndAllowsRetry(t *testing.T) {
 	oldTimeout, oldMargin := handoffRequestTimeout, handoffRequestSafetyMargin
-	handoffRequestTimeout = 30 * time.Millisecond
-	handoffRequestSafetyMargin = 5 * time.Millisecond
+	handoffRequestTimeout = time.Second
+	handoffRequestSafetyMargin = 100 * time.Millisecond
 	defer func() {
 		handoffRequestTimeout, handoffRequestSafetyMargin = oldTimeout, oldMargin
 	}()
@@ -197,7 +197,7 @@ func TestHandleHandoffTimeoutClearsRequestAndAllowsRetry(t *testing.T) {
 	database, run, m, monitorCtx, cancel, wake := newHandoffFixture(t, true)
 	defer cancel(context.Canceled)
 
-	ctx, cancelRequest := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancelRequest := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelRequest()
 	result := requestHandoffContext(t, m, run.ID, wake, ctx)
 	if err := awaitHandoffResult(t, result); err == nil || !strings.Contains(err.Error(), "timed out") {

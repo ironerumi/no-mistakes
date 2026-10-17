@@ -160,9 +160,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	// Handlers use it for process-ancestry authorization; it is never accepted
 	// from request parameters or environment variables.
 	ctx := withPeerPID(context.Background(), authenticatedPeerPID(conn))
-	// Create a context that cancels when the server shuts down or the client
-	// disconnects. Regular handlers run concurrently with the read loop so EOF
-	// can cancel a handler that is waiting on a long-running operation.
+	// Create a context that cancels when the server shuts down.
 	ctx, cancel := context.WithCancel(ctx)
 	go func() {
 		select {
@@ -171,18 +169,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		case <-ctx.Done():
 		}
 	}()
-
-	var responseMu sync.Mutex
-	writeResponse := func(value interface{}) error {
-		responseMu.Lock()
-		defer responseMu.Unlock()
-		return encoder.Encode(value)
-	}
-	var handlers sync.WaitGroup
-	defer func() {
-		cancel()
-		handlers.Wait()
-	}()
+	defer cancel()
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -194,9 +181,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		if err := json.Unmarshal(line, &req); err != nil {
 			slog.Warn("ipc request failed", "method", "<parse>", "error", "invalid json")
 			resp := NewErrorResponse(0, ErrParseError, "invalid json")
-			if err := writeResponse(resp); err != nil {
-				return
-			}
+			encoder.Encode(resp)
 			continue
 		}
 
@@ -210,7 +195,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			stream, err := streamHandler(streamCtx, req.Params)
 			if err != nil {
 				slog.Warn("ipc stream request failed", "method", req.Method, "error", err)
-				_ = writeResponse(NewErrorResponse(req.ID, ErrInternal, err.Error()))
+				_ = encoder.Encode(NewErrorResponse(req.ID, ErrInternal, err.Error()))
 				streamCancel()
 				return
 			}
@@ -219,7 +204,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			// Acknowledge only after stream preparation has registered its event
 			// source, so the client can safely reconcile as soon as this arrives.
 			resp, _ := NewResponse(req.ID, map[string]bool{"ok": true})
-			if err := writeResponse(resp); err != nil {
+			if err := encoder.Encode(resp); err != nil {
 				slog.Error("write stream response", "error", err)
 				return
 			}
@@ -231,7 +216,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				cancel()
 			}()
 			send := func(event interface{}) error {
-				return writeResponse(event)
+				return encoder.Encode(event)
 			}
 			streamErr := stream(send)
 			_ = conn.Close()
@@ -242,17 +227,12 @@ func (s *Server) handleConn(conn net.Conn) {
 			return // connection done after streaming
 		}
 
-		handlers.Add(1)
-		go func(req Request) {
-			defer handlers.Done()
-			resp := s.dispatch(ctx, req)
-			if err := writeResponse(resp); err != nil {
-				slog.Error("write response", "error", err)
-				cancel()
-			}
-		}(req)
+		resp := s.dispatch(ctx, req)
+		if err := encoder.Encode(resp); err != nil {
+			slog.Error("write response", "error", err)
+			return
+		}
 	}
-	cancel()
 }
 
 type requestDeadlineContextKey struct{}
