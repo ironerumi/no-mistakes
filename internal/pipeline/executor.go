@@ -94,10 +94,11 @@ type Executor struct {
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
 	onPRMerged            func(context.Context, string)
-	// ciReadinessTransition wraps the readiness DB write and event emission at
-	// a daemon-owned synchronization boundary. It is nil in standalone
-	// executor embeddings.
-	ciReadinessTransition func(runID string, ready, declaredNoCI bool, persist func() error) error
+	// ciObservationTransition wraps CI readiness and PR-state writes at a
+	// daemon-owned synchronization boundary. It is nil in standalone executor
+	// embeddings.
+	ciObservationTransition func(runID string, withdrawal bool, persist func() error) error
+	ciHandoffValid          func(runID string) bool
 }
 
 // SetOnPRMerged registers a best-effort hook invoked after a merged PR state
@@ -109,14 +110,21 @@ func (e *Executor) SetOnPRMerged(fn func(context.Context, string)) {
 	e.onPRMerged = fn
 }
 
-// SetCIReadinessTransition serializes CI readiness persistence with daemon
+// SetCIObservationTransition serializes CI observations with daemon
 // lifecycle decisions. The transition owns the persist callback's critical
 // section; standalone executors use the direct DB path instead.
-func (e *Executor) SetCIReadinessTransition(fn func(runID string, ready, declaredNoCI bool, persist func() error) error) {
+func (e *Executor) SetCIObservationTransition(fn func(runID string, withdrawal bool, persist func() error) error) {
 	if e == nil {
 		return
 	}
-	e.ciReadinessTransition = fn
+	e.ciObservationTransition = fn
+}
+
+func (e *Executor) SetCIHandoffValidator(fn func(runID string) bool) {
+	if e == nil {
+		return
+	}
+	e.ciHandoffValid = fn
 }
 
 // SetForgeContext configures the immutable provider context used by every
@@ -1384,8 +1392,17 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 			return nil
 		}
-		if e.ciReadinessTransition != nil {
-			return e.ciReadinessTransition(run.ID, ready, declaredNoCI, persist)
+		if e.ciObservationTransition != nil {
+			return e.ciObservationTransition(run.ID, !ready, persist)
+		}
+		return persist()
+	}
+	sctx.SetPRState = func(state string) error {
+		persist := func() error {
+			return e.db.UpdateRunPRState(run.ID, state)
+		}
+		if e.ciObservationTransition != nil {
+			return e.ciObservationTransition(run.ID, state != "open", persist)
 		}
 		return persist()
 	}
@@ -1445,7 +1462,8 @@ rounds:
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
 			durationMS := executionMS + roundDuration
-			if stepName == types.StepCI && errors.Is(context.Cause(ctx), ErrHandoff) {
+			handoff := errors.Is(err, ErrHandoff) || errors.Is(context.Cause(ctx), ErrHandoff)
+			if stepName == types.StepCI && handoff && e.handoffClaimIsValid(run.ID) {
 				if dbErr := e.db.CompleteStep(sr.ID, 0, durationMS, logPath); dbErr != nil {
 					return false, "", dbErr
 				}
@@ -2342,7 +2360,7 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if errors.Is(err, ErrParkedAtShutdown) {
 		return err
 	}
-	if errors.Is(err, ErrHandoff) {
+	if errors.Is(err, ErrHandoff) && e.handoffClaimIsValid(run.ID) {
 		return e.completeRunWithStatus(run, repo, types.RunHandedOff)
 	}
 	errMsg := err.Error()
@@ -2372,6 +2390,13 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	run.Error = &errMsg
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	return err
+}
+
+func (e *Executor) handoffClaimIsValid(runID string) bool {
+	if e.ciHandoffValid == nil {
+		return true
+	}
+	return e.ciHandoffValid(runID)
 }
 
 func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
