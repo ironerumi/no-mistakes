@@ -393,6 +393,12 @@ func (usageLimitReachedError) Error() string { return "provider usage limit reac
 
 func (usageLimitReachedError) UsageLimitReached() bool { return true }
 
+type terminalProviderError struct{}
+
+func (terminalProviderError) Error() string { return "provider authentication failed" }
+
+func (terminalProviderError) TerminalProviderError() bool { return true }
+
 type processExitError struct{ message string }
 
 func (e processExitError) Error() string { return e.message }
@@ -407,6 +413,7 @@ func TestRetryableAgentCrash(t *testing.T) {
 		want       bool
 	}{
 		{"process exit", &agentInvocationFailure{err: processExitError{"agent exited: exit status 1"}}, false, true},
+		{"terminal provider error with process exit", &agentInvocationFailure{err: errors.Join(terminalProviderError{}, processExitError{"claude exited: exit status 1"})}, false, false},
 		{"unowned process exit", &exec.ExitError{}, false, false},
 		{"unclassified error", &agentInvocationFailure{err: errors.New("exit status 1")}, false, false},
 		{"unparseable", agent.RejectStructuredOutput(errors.New("invalid JSON")), false, false},

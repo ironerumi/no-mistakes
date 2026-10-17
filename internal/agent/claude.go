@@ -47,6 +47,11 @@ func (e *claudeAPIError) UsageLimitReached() bool {
 	return e.usageLimitReached
 }
 
+func (e *claudeAPIError) TerminalProviderError() bool {
+	_, retry := e.classify()
+	return !retry
+}
+
 func (e *claudeAPIError) Error() string {
 	message := []rune(e.Message)
 	if len(message) > claudeAPIErrorMessageMaxRunes {
