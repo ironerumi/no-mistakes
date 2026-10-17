@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -10,7 +11,7 @@ import (
 
 // resolveAxiRespondInput shares the intent transport's bounded regular-file
 // and stdin readers. Inline values retain their existing semantics.
-func resolveAxiRespondInput(cmd *cobra.Command, name, inline, file string) (string, error) {
+func resolveAxiRespondInput(ctx context.Context, cmd *cobra.Command, name, inline, file string) (string, error) {
 	inlineFlag, fileFlag := "--"+name, "--"+name+"-file"
 	hasInline, hasFile := cmd.Flags().Changed(name), cmd.Flags().Changed(name+"-file")
 	if hasInline && hasFile {
@@ -32,7 +33,7 @@ func resolveAxiRespondInput(cmd *cobra.Command, name, inline, file string) (stri
 		}
 	} else {
 		source = inlineFlag + " stdin"
-		data, err = readAxiIntent(cmd.InOrStdin())
+		data, err = readAxiIntentContext(ctx, cmd.InOrStdin())
 		if err != nil {
 			return "", fmt.Errorf("read %s: %w", source, err)
 		}

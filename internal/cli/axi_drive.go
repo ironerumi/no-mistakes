@@ -1497,7 +1497,7 @@ func newAxiRespondCmd() *cobra.Command {
 			"Warning: inline text is expanded by your shell; backticks can execute commands\n" +
 			"and silently replace content. Use --instructions-file or --add-finding-file\n" +
 			"for text containing backticks, quotes, or newlines. Use --instructions - or --add-finding - to read\n" +
-			"stdin until EOF; file paths are literal (including '-').\n\n" +
+			"stdin until EOF, cancellation, or --wait; file paths are literal (including '-').\n\n" +
 			"--wait bounds this hold (default 8m) so an agent harness with a 10-minute\n" +
 			"tool cap gets a structured return instead of an unbounded hang. Elapsed wait\n" +
 			"is not a failed run: inspect with axi status and reattach. A slow live daemon\n" +
@@ -1595,12 +1595,18 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	if instructionsStdin && findingStdin {
 		return emitError(cmd, 2, "only one respond input may read stdin")
 	}
-	resolvedInstructions, err := resolveAxiRespondInput(cmd, "instructions", ra.instructions, ra.instructionsFile)
+	resolvedInstructions, err := resolveAxiRespondInput(driveCtx, cmd, "instructions", ra.instructions, ra.instructionsFile)
 	if err != nil {
+		if isAxiWaitElapsed(ctx, driveCtx, err) {
+			return emitAxiWaitElapsedForRun(cmd, ra.wait, ra.runID, respondCmd+" --action approve|fix|skip")
+		}
 		return emitError(cmd, 2, err.Error())
 	}
-	resolvedFinding, err := resolveAxiRespondInput(cmd, "add-finding", ra.addFinding, ra.addFindingFile)
+	resolvedFinding, err := resolveAxiRespondInput(driveCtx, cmd, "add-finding", ra.addFinding, ra.addFindingFile)
 	if err != nil {
+		if isAxiWaitElapsed(ctx, driveCtx, err) {
+			return emitAxiWaitElapsedForRun(cmd, ra.wait, ra.runID, respondCmd+" --action approve|fix|skip")
+		}
 		return emitError(cmd, 2, err.Error())
 	}
 	if act != types.ActionFix && (cmd.Flags().Changed("instructions-file") || cmd.Flags().Changed("add-finding-file")) {

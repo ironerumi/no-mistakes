@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 )
@@ -49,6 +50,54 @@ func TestAxiRespondInputRejectsBeforeDaemon(t *testing.T) {
 			var ee *exitError
 			if !errors.As(err, &ee) || ee.code != 2 || !strings.Contains(out.String(), tc.want) {
 				t.Fatalf("error %v, output %s; want %q", err, out.String(), tc.want)
+			}
+		})
+	}
+}
+
+func TestAxiRespondStdinHonorsWaitWhilePipeRemainsOpen(t *testing.T) {
+	for _, flag := range []string{"--instructions", "--add-finding"} {
+		t.Run(flag, func(t *testing.T) {
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Close()
+
+			cmd := newAxiRespondCmd()
+			cmd.SetArgs([]string{"--action", "fix", "--findings", "R1", flag, "-", "--wait", "50ms"})
+			cmd.SetIn(reader)
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&out)
+
+			executed := make(chan error, 1)
+			go func() { executed <- cmd.Execute() }()
+			written := make(chan error, 1)
+			go func() {
+				_, writeErr := writer.Write([]byte("partial input"))
+				written <- writeErr
+			}()
+			select {
+			case writeErr := <-written:
+				if writeErr != nil {
+					t.Fatalf("write stdin: %v", writeErr)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("stdin writer did not reach the command")
+			}
+
+			select {
+			case err := <-executed:
+				var ee *exitError
+				if !errors.As(err, &ee) || ee.code != 1 {
+					t.Fatalf("respond error = %v, output %s; want a wait error", err, out.String())
+				}
+				if !strings.Contains(out.String(), "wait of 50ms elapsed") {
+					t.Fatalf("output = %s; want the structured wait timeout", out.String())
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("respond remained blocked on stdin after --wait elapsed")
 			}
 		})
 	}
