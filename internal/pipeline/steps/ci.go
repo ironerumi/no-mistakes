@@ -476,6 +476,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	consecutiveCheckErrs := 0
 	consecutiveBotCommentErrs := 0
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
+		clearCIMonitorReady(sctx)
 		sctx.Log("CI timeout reached")
 		var outcome *pipeline.StepOutcome
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {

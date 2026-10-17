@@ -1542,7 +1542,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		if err := mgr.HandleHandoff(p.RunID); err != nil {
+		if err := mgr.HandleHandoff(ctx, p.RunID); err != nil {
 			return nil, err
 		}
 		return &ipc.CancelRunResult{OK: true}, nil
