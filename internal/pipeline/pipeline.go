@@ -137,6 +137,12 @@ type StepContext struct {
 	// step in the same run (e.g. the combined document+lint pass).
 	Shared             *RunShared
 	CIReadinessChanged func(ready, declaredNoCI bool)
+	// SetCIReadiness is the daemon-owned transition boundary for CI monitor
+	// readiness. When set, the CI step uses it instead of writing readiness
+	// directly, so a daemon can serialize readiness changes with lifecycle
+	// decisions such as handoff. Embeddings leave it nil and use the local DB
+	// write path.
+	SetCIReadiness func(ready, declaredNoCI bool) error
 	// MarkRunning tells the executor that a step re-executing as a fix round
 	// has finished its repair and is executing normally again, so the step's
 	// status returns from fixing to running before Execute returns. The CI

@@ -10,17 +10,26 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
+	toon "github.com/toon-format/toon-go"
 )
 
 func TestRenderDriveResultHandoff(t *testing.T) {
 	var out bytes.Buffer
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
-	run := &ipc.RunInfo{ID: "handed-off", Status: types.RunHandedOff}
-	if err := renderDriveResult(cmd, run, false); err != nil {
+	run := &ipc.RunInfo{
+		ID:                 "handed-off",
+		Status:             types.RunHandedOff,
+		TestOverrideReason: "approved synthetic Test exception",
+		Steps: []ipc.StepResultInfo{{
+			StepName:     types.StepReview,
+			FixSummaries: []string{"pipeline fixed a review finding"},
+		}},
+	}
+	if err := renderDriveResult(cmd, run, false, toon.Field{Key: "handed_off", Value: true}); err != nil {
 		t.Fatalf("handoff returned failure: %v", err)
 	}
-	for _, want := range []string{"outcome: handed-off", "PR remains open", "not merged or cancelled"} {
+	for _, want := range []string{"handed_off: true", "outcome: handed-off", "PR remains open", "not merged or cancelled", "test_override_reason", "approved synthetic Test exception", "fixes", "pipeline fixed a review finding", "Summarize this pipeline run"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("missing %q: %s", want, out.String())
 		}
@@ -48,7 +57,7 @@ func TestAxiHandoff(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, want := range []string{"handed_off: true", "run_status: handed_off"} {
+				for _, want := range []string{"handed_off: true", "outcome: handed-off", "PR remains open"} {
 					if !strings.Contains(out, want) {
 						t.Fatalf("missing %q: %s", want, out)
 					}

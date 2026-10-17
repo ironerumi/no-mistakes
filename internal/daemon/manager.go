@@ -46,12 +46,13 @@ var fetchRecoveredRemoteBranch = git.FetchRemoteBranch
 
 // RunManager tracks active pipeline executors and manages run lifecycle.
 type RunManager struct {
-	mu           sync.Mutex
-	executors    map[string]*pipeline.Executor      // runID → executor
-	cancels      map[string]context.CancelCauseFunc // runID → cancel function with cause
-	dones        map[string]chan struct{}           // runID → closed when goroutine exits
-	wg           sync.WaitGroup                     // tracks background run goroutines
-	shuttingDown atomic.Bool                        // prevents new runs during shutdown
+	mu            sync.Mutex
+	executors     map[string]*pipeline.Executor      // runID → executor
+	cancels       map[string]context.CancelCauseFunc // runID → cancel function with cause
+	dones         map[string]chan struct{}           // runID → closed when goroutine exits
+	handoffClaims map[string]bool                    // runIDs atomically claimed for handoff
+	wg            sync.WaitGroup                     // tracks background run goroutines
+	shuttingDown  atomic.Bool                        // prevents new runs during shutdown
 
 	afterRetryProof func() // test seam: runs between HandleRetry's proof and the launch
 	db              *db.DB
@@ -93,6 +94,7 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		executors:     make(map[string]*pipeline.Executor),
 		cancels:       make(map[string]context.CancelCauseFunc),
 		dones:         make(map[string]chan struct{}),
+		handoffClaims: make(map[string]bool),
 		db:            database,
 		paths:         p,
 		steps:         stepFactory,
@@ -414,6 +416,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
+	executor.SetCIReadinessTransition(m.transitionCIReadiness)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -459,6 +462,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			delete(m.executors, plan.run.ID)
 			delete(m.cancels, plan.run.ID)
 			delete(m.dones, plan.run.ID)
+			delete(m.handoffClaims, plan.run.ID)
 			m.mu.Unlock()
 		}()
 
@@ -1748,6 +1752,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// Create executor with event broadcast.
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	executor.SetCIReadinessTransition(m.transitionCIReadiness)
 	executor.SetForgeContext(forgeCtx)
 	executor.SetSkippedSteps(skipSteps)
 	if retry != nil {
@@ -1824,6 +1829,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			delete(m.executors, run.ID)
 			delete(m.cancels, run.ID)
 			delete(m.dones, run.ID)
+			delete(m.handoffClaims, run.ID)
 			m.mu.Unlock()
 		}()
 
@@ -2263,6 +2269,18 @@ func (m *RunManager) HandleCancel(runID string) error {
 	return nil
 }
 
+// transitionCIReadiness serializes the monitor's readiness write with
+// lifecycle decisions. A handoff claim wins over later stale monitor updates;
+// a readiness withdrawal already holding this transition wins over handoff.
+func (m *RunManager) transitionCIReadiness(runID string, ready, declaredNoCI bool, persist func() error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.handoffClaims != nil && m.handoffClaims[runID] {
+		return nil
+	}
+	return persist()
+}
+
 // HandleHandoff ends only an actively monitoring, green, open-PR run. Readiness
 // is the monitor's authoritative persisted observation, never inferred from logs.
 func (m *RunManager) HandleHandoff(runID string) error {
@@ -2271,6 +2289,9 @@ func (m *RunManager) HandleHandoff(runID string) error {
 	cancel, ok := m.cancels[runID]
 	if !ok {
 		return fmt.Errorf("no active CI monitor for run %s; use axi status to inspect the run", runID)
+	}
+	if m.handoffClaims != nil && m.handoffClaims[runID] {
+		return fmt.Errorf("handoff already requested for run %s; use axi status to inspect the run", runID)
 	}
 	run, err := m.db.GetRun(runID)
 	if err != nil {
@@ -2285,6 +2306,10 @@ func (m *RunManager) HandleHandoff(runID string) error {
 	}
 	for _, step := range steps {
 		if step.StepName == types.StepCI && step.Status == types.StepStatusRunning {
+			if m.handoffClaims == nil {
+				m.handoffClaims = make(map[string]bool)
+			}
+			m.handoffClaims[runID] = true
 			cancel(pipeline.ErrHandoff)
 			return nil
 		}
