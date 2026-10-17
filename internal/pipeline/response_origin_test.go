@@ -11,9 +11,16 @@ import (
 )
 
 func TestExecutor_ResponseOrigin(t *testing.T) {
-	for _, origin := range []types.ResponseOrigin{types.ResponseOriginAutoYes, types.ResponseOriginInteractive, ""} {
+	for _, tc := range []struct {
+		origin types.ResponseOrigin
+		want   string
+	}{
+		{types.ResponseOriginAutoYes, "auto_yes"},
+		{types.ResponseOriginInteractive, "interactive"},
+		{"", "unknown"},
+	} {
 		for _, action := range []types.ApprovalAction{types.ActionFix, types.ActionApprove, types.ActionSkip, types.ActionAbort} {
-			t.Run(string(origin)+"/"+string(action), func(t *testing.T) {
+			t.Run(string(tc.origin)+"/"+string(action), func(t *testing.T) {
 				database, p, run, repo := setupTest(t)
 				parked := make(chan struct{}, 1)
 				step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
@@ -51,8 +58,8 @@ func TestExecutor_ResponseOrigin(t *testing.T) {
 					ids = []string{"journal-version-deduplication"}
 				}
 				options := []ResponseOptions(nil)
-				if origin != "" {
-					options = append(options, ResponseOptions{Origin: origin})
+				if tc.origin != "" {
+					options = append(options, ResponseOptions{Origin: tc.origin})
 				}
 				if _, err := exec.RespondWithOverrides(types.StepReview, action, ids, nil, nil, nil, "", options...); err != nil {
 					t.Fatal(err)
@@ -68,14 +75,14 @@ func TestExecutor_ResponseOrigin(t *testing.T) {
 					if err != nil || len(rounds) == 0 {
 						t.Fatalf("rounds: %v %v", rounds, err)
 					}
-					if rounds[0].ResponseOrigin != origin.OrUnknown() {
-						t.Fatalf("round origin = %q, want %q", rounds[0].ResponseOrigin, origin.OrUnknown())
+					if string(rounds[0].ResponseOrigin) != tc.want {
+						t.Fatalf("round origin = %q, want %q", rounds[0].ResponseOrigin, tc.want)
 					}
 					if rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != "user" {
 						t.Fatalf("selection semantics changed: %+v", rounds[0])
 					}
-				} else if steps[0].ResponseOrigin != origin.OrUnknown() {
-					t.Fatalf("step origin = %q, want %q", steps[0].ResponseOrigin, origin.OrUnknown())
+				} else if string(steps[0].ResponseOrigin) != tc.want {
+					t.Fatalf("step origin = %q, want %q", steps[0].ResponseOrigin, tc.want)
 				}
 				select {
 				case err := <-done:

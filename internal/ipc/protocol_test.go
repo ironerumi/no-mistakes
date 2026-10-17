@@ -240,18 +240,20 @@ func TestRespondParams(t *testing.T) {
 }
 
 func TestRespondParamsOrigin(t *testing.T) {
-	for _, raw := range []string{
-		`{"run_id":"run123","step":"review","action":"approve"}`,
-		`{"run_id":"run123","step":"review","action":"approve","origin":"interactive"}`,
-		`{"run_id":"run123","step":"review","action":"fix","origin":"auto_yes"}`,
+	for _, tc := range []struct {
+		raw  string
+		want string
+	}{
+		{`{"run_id":"run123","step":"review","action":"approve"}`, "unknown"},
+		{`{"run_id":"run123","step":"review","action":"approve","origin":"interactive"}`, "interactive"},
+		{`{"run_id":"run123","step":"review","action":"fix","origin":"auto_yes"}`, "auto_yes"},
 	} {
 		var params RespondParams
-		if err := json.Unmarshal([]byte(raw), &params); err != nil {
+		if err := json.Unmarshal([]byte(tc.raw), &params); err != nil {
 			t.Fatal(err)
 		}
-		want := params.Origin.OrUnknown()
-		if params.Origin == "" && want != types.ResponseOriginUnknown {
-			t.Fatal("legacy response acquired an inferred origin")
+		if got := string(params.Origin.OrUnknown()); got != tc.want {
+			t.Fatalf("origin = %q, want %q", got, tc.want)
 		}
 		encoded, err := json.Marshal(params)
 		if err != nil {
@@ -261,8 +263,8 @@ func TestRespondParamsOrigin(t *testing.T) {
 		if err := json.Unmarshal(encoded, &roundTrip); err != nil {
 			t.Fatal(err)
 		}
-		if roundTrip.Origin.OrUnknown() != want {
-			t.Fatalf("origin changed on round trip: %s", encoded)
+		if got := string(roundTrip.Origin.OrUnknown()); got != tc.want {
+			t.Fatalf("origin changed on round trip: got %q, want %q (%s)", got, tc.want, encoded)
 		}
 	}
 }
