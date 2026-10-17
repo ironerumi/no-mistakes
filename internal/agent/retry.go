@@ -234,7 +234,9 @@ func classifyTransient(err error) (string, bool) {
 	if strings.Contains(msg, "pi did not finish by calling no_mistakes_output alone") {
 		return "pi missing output tool", true
 	}
-	if strings.Contains(msg, "pi exited: fetch failed") {
+	const piFetchFailureSuffix = ": fetch failed"
+	if strings.HasPrefix(msg, "pi exited: ") && strings.HasSuffix(msg, piFetchFailureSuffix) &&
+		len(msg) > len("pi exited: ")+len(piFetchFailureSuffix) {
 		return "pi fetch failed", true
 	}
 	for _, sig := range transientNeedles {

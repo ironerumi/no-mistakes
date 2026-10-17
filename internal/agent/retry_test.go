@@ -92,7 +92,7 @@ func TestClassifyTransient_Positive(t *testing.T) {
 		},
 		{
 			name:    "pi fetch failed",
-			errMsg:  `pi exited: fetch failed`,
+			errMsg:  `pi exited: exit status 1: fetch failed`,
 			wantSub: "fetch failed",
 		},
 		{
@@ -224,7 +224,7 @@ func TestClassifyTransient_NilAndContext(t *testing.T) {
 	}
 	for _, message := range []string{
 		"pi did not finish by calling no_mistakes_output alone",
-		"pi exited: fetch failed",
+		"pi exited: exit status 1: fetch failed",
 	} {
 		for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
 			if label, ok := classifyTransient(fmt.Errorf("%s: %w", message, cause)); ok {
@@ -309,7 +309,7 @@ func TestRunWithRetry_PiTransientThenSucceeds(t *testing.T) {
 
 	for _, message := range []string{
 		"pi did not finish by calling no_mistakes_output alone",
-		"pi exited: fetch failed",
+		"pi exited: exit status 1: fetch failed",
 	} {
 		t.Run(message, func(t *testing.T) {
 			calls := 0
