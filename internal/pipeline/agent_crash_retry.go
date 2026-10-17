@@ -212,11 +212,14 @@ func (e *Executor) crashRetryProof(sctx *StepContext) (crashRetryProof, error) {
 }
 
 func (e *Executor) executeWithCrashRetry(step Step, sctx *StepContext, remaining *int) (*StepOutcome, error) {
-	if *remaining <= 0 || !crashRetryStep(step.Name()) || sctx.Fixing || sctx.FinalizingAnswers || sctx.CoverageContinuation != nil {
+	if !crashRetryStep(step.Name()) || (sctx.Fixing && !sctx.FinalizingAnswers) || (*remaining <= 0 && e.crashRetryBaseSHA == "") {
 		return step.Execute(sctx)
 	}
 	sctx.crashRetryBaseSHA = &e.crashRetryBaseSHA
 	defer func() { sctx.crashRetryBaseSHA = nil }()
+	if *remaining <= 0 || sctx.FinalizingAnswers || sctx.CoverageContinuation != nil {
+		return step.Execute(sctx)
+	}
 	proof, proofErr := e.crashRetryProof(sctx)
 	for {
 		outcome, err := step.Execute(sctx)

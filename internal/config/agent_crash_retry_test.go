@@ -38,9 +38,19 @@ func TestAgentCrashRetriesConfig(t *testing.T) {
 }
 
 func TestAgentCrashRetryExplicitTimeouts(t *testing.T) {
-	for _, key := range []string{"agent_timeout", "review_agent_timeout", "test_agent_timeout", "agent_working_timeout", "review_agent_working_timeout", "test_agent_working_timeout"} {
-		t.Run(key, func(t *testing.T) {
-			global, err := LoadGlobalFromBytes([]byte(key + ": 30m\n"))
+	for _, tc := range []struct {
+		key   string
+		value string
+	}{
+		{"agent_timeout", "31m"},
+		{"review_agent_timeout", "31m"},
+		{"test_agent_timeout", "31m"},
+		{"agent_working_timeout", "30m"},
+		{"review_agent_working_timeout", "30m"},
+		{"test_agent_working_timeout", "30m"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			global, err := LoadGlobalFromBytes([]byte(tc.key + ": " + tc.value + "\n"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -49,8 +59,19 @@ func TestAgentCrashRetryExplicitTimeouts(t *testing.T) {
 			}
 		})
 	}
-	global, err := LoadGlobalFromBytes([]byte("{}\n"))
+	global, err := LoadGlobalFromBytes([]byte("agent_timeout: 30m\nreview_agent_timeout: 30m\ntest_agent_timeout: 30m\n"))
 	if err != nil || global.AgentTimeoutsConfigured {
-		t.Fatalf("default timeouts marked explicit: %+v, %v", global, err)
+		t.Fatalf("shipped timeout values marked explicit: %+v, %v", global, err)
+	}
+}
+
+func TestAgentCrashRetriesWithShippedDefaults(t *testing.T) {
+	data := strings.Replace(defaultConfigYAML, "agent_crash_retries: 0", "agent_crash_retries: 1", 1)
+	global, err := LoadGlobalFromBytes([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if global.AgentCrashRetries != 1 || global.AgentTimeoutsConfigured {
+		t.Fatalf("shipped defaults disabled default-budget retries: retries=%d configured=%t", global.AgentCrashRetries, global.AgentTimeoutsConfigured)
 	}
 }

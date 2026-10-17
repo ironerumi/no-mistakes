@@ -2602,14 +2602,14 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		return nil, fmt.Errorf("agent_crash_retries must be between 0 and 3")
 	}
 	cfg.AgentCrashRetries = raw.AgentCrashRetries
-	cfg.AgentTimeoutsConfigured = raw.AgentTimeout != "" || raw.ReviewAgentTimeout != "" || raw.TestAgentTimeout != "" ||
-		raw.AgentWorkingTimeout != "" || raw.ReviewAgentWorkingTimeout != "" || raw.TestAgentWorkingTimeout != ""
+	configuredTimeout := false
 	if raw.AgentTimeout != "" {
 		d, err := parsePositiveDuration("agent_timeout", raw.AgentTimeout)
 		if err != nil {
 			return nil, err
 		}
 		cfg.AgentTimeout = d
+		configuredTimeout = d != DefaultAgentTimeout
 	}
 	if raw.ReviewAgentTimeout != "" {
 		d, err := parsePositiveDuration("review_agent_timeout", raw.ReviewAgentTimeout)
@@ -2617,6 +2617,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.ReviewAgentTimeout = d
+		configuredTimeout = configuredTimeout || d != DefaultReviewAgentTimeout
 	}
 	if raw.TestAgentTimeout != "" {
 		d, err := parsePositiveDuration("test_agent_timeout", raw.TestAgentTimeout)
@@ -2624,6 +2625,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.TestAgentTimeout = d
+		configuredTimeout = configuredTimeout || d != DefaultTestAgentTimeout
 	}
 	if raw.AgentWorkingTimeout != "" {
 		d, err := parsePositiveDuration("agent_working_timeout", raw.AgentWorkingTimeout)
@@ -2631,6 +2633,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.AgentWorkingTimeout = d
+		configuredTimeout = true
 	}
 	if raw.ReviewAgentWorkingTimeout != "" {
 		d, err := parsePositiveDuration("review_agent_working_timeout", raw.ReviewAgentWorkingTimeout)
@@ -2638,6 +2641,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.ReviewAgentWorkingTimeout = d
+		configuredTimeout = true
 	}
 	if raw.TestAgentWorkingTimeout != "" {
 		d, err := parsePositiveDuration("test_agent_working_timeout", raw.TestAgentWorkingTimeout)
@@ -2645,7 +2649,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.TestAgentWorkingTimeout = d
+		configuredTimeout = true
 	}
+	cfg.AgentTimeoutsConfigured = configuredTimeout
 	if err := validateWorkingCap("agent_working_timeout", "agent_timeout", cfg.AgentWorkingTimeout, cfg.AgentTimeout); err != nil {
 		return nil, err
 	}
