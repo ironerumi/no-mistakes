@@ -368,7 +368,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	}
 	pr := &scm.PR{Number: prNumber, URL: prURL}
 	if retryRefusal {
-		if err := setCIMonitorReadiness(sctx, false, false); err != nil {
+		if err := clearCIMonitorReady(sctx); err != nil {
 			return nil, err
 		}
 		repair, err := s.retryProtectedPathRepair(sctx)
@@ -767,7 +767,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			timeoutFailingChecks = terminalCheckTargetsForNames(checks, mergeCheckNames(reportedIssues, awaitingRerun))
 
 			if hasIssues || len(awaitingRerun) > 0 {
-				if err := setCIMonitorReadiness(sctx, false, false); err != nil {
+				if err := clearCIMonitorReady(sctx); err != nil {
 					return nil, err
 				}
 			}
@@ -982,6 +982,8 @@ func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) (s
 				return previous, err
 			}
 			sctx.Log(fmt.Sprintf("warning: could not persist CI readiness: %v", err))
+			sctx.Log(message)
+			return previous, nil
 		}
 		sctx.Log(message)
 	}
