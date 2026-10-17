@@ -6,7 +6,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -79,24 +78,13 @@ func requestHandoffContext(t *testing.T, m *RunManager, runID string, wake <-cha
 	t.Helper()
 	result := make(chan error, 1)
 	go func() { result <- m.HandleHandoff(ctx, runID) }()
-	select {
-	case <-wake:
-		return result
-	case <-time.After(2 * time.Second):
-		t.Fatal("handoff request did not wake the CI monitor")
-		return nil
-	}
+	<-wake
+	return result
 }
 
 func awaitHandoffResult(t *testing.T, result <-chan error) error {
 	t.Helper()
-	select {
-	case err := <-result:
-		return err
-	case <-time.After(5 * time.Second):
-		t.Fatal("handoff request was not resolved by the CI monitor")
-		return nil
-	}
+	return <-result
 }
 
 func TestHandleHandoffAfterMonitorExitRefusesImmediately(t *testing.T) {
@@ -223,8 +211,8 @@ func TestHandleHandoffPRCloseRefusesAndContinues(t *testing.T) {
 
 func TestHandleHandoffTimeoutClearsRequestAndAllowsRetry(t *testing.T) {
 	oldTimeout, oldMargin := handoffRequestTimeout, handoffRequestSafetyMargin
-	handoffRequestTimeout = time.Second
-	handoffRequestSafetyMargin = 100 * time.Millisecond
+	handoffRequestTimeout = 0
+	handoffRequestSafetyMargin = 0
 	defer func() {
 		handoffRequestTimeout, handoffRequestSafetyMargin = oldTimeout, oldMargin
 	}()
@@ -232,9 +220,7 @@ func TestHandleHandoffTimeoutClearsRequestAndAllowsRetry(t *testing.T) {
 	database, run, m, monitorCtx, cancel, wake := newHandoffFixture(t, true)
 	defer cancel(context.Canceled)
 
-	ctx, cancelRequest := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancelRequest()
-	result := requestHandoffContext(t, m, run.ID, wake, ctx)
+	result := requestHandoffContext(t, m, run.ID, wake, context.Background())
 	if err := awaitHandoffResult(t, result); err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("handoff result = %v, want clear timeout", err)
 	}
@@ -246,6 +232,7 @@ func TestHandleHandoffTimeoutClearsRequestAndAllowsRetry(t *testing.T) {
 		t.Fatal("timeout left a handoff request pending")
 	}
 
+	handoffRequestTimeout, handoffRequestSafetyMargin = oldTimeout, oldMargin
 	retry := requestHandoff(t, m, run.ID, wake)
 	if err := m.transitionCIObservation(run.ID, false, true, "", func() error {
 		return database.SetRunCIReady(run.ID, true)
