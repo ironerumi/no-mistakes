@@ -72,9 +72,13 @@ func newHandoffFixtureWithPRState(t *testing.T, ready, nullPRState bool) (*db.DB
 }
 
 func requestHandoff(t *testing.T, m *RunManager, runID string, wake <-chan struct{}) <-chan error {
+	return requestHandoffContext(t, m, runID, wake, context.Background())
+}
+
+func requestHandoffContext(t *testing.T, m *RunManager, runID string, wake <-chan struct{}, ctx context.Context) <-chan error {
 	t.Helper()
 	result := make(chan error, 1)
-	go func() { result <- m.HandleHandoff(context.Background(), runID) }()
+	go func() { result <- m.HandleHandoff(ctx, runID) }()
 	select {
 	case <-wake:
 		return result
@@ -179,6 +183,45 @@ func TestHandleHandoffPRCloseRefusesAndContinues(t *testing.T) {
 	}
 	if got.Status != types.RunCompleted || got.PRState == nil || *got.PRState != "closed" {
 		t.Fatalf("run = status %s, PR state %v; want completed/closed", got.Status, got.PRState)
+	}
+}
+
+func TestHandleHandoffTimeoutClearsRequestAndAllowsRetry(t *testing.T) {
+	oldTimeout, oldMargin := handoffRequestTimeout, handoffRequestSafetyMargin
+	handoffRequestTimeout = 30 * time.Millisecond
+	handoffRequestSafetyMargin = 5 * time.Millisecond
+	defer func() {
+		handoffRequestTimeout, handoffRequestSafetyMargin = oldTimeout, oldMargin
+	}()
+
+	database, run, m, monitorCtx, cancel, wake := newHandoffFixture(t, true)
+	defer cancel(context.Canceled)
+
+	ctx, cancelRequest := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelRequest()
+	result := requestHandoffContext(t, m, run.ID, wake, ctx)
+	if err := awaitHandoffResult(t, result); err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("handoff result = %v, want clear timeout", err)
+	}
+
+	m.mu.Lock()
+	_, pending := m.handoffRequests[run.ID]
+	m.mu.Unlock()
+	if pending {
+		t.Fatal("timeout left a handoff request pending")
+	}
+
+	retry := requestHandoff(t, m, run.ID, wake)
+	if err := m.transitionCIObservation(run.ID, false, true, "", func() error {
+		return database.SetRunCIReady(run.ID, true)
+	}); !errors.Is(err, pipeline.ErrHandoff) {
+		t.Fatalf("retry observation error = %v, want ErrHandoff", err)
+	}
+	if err := awaitHandoffResult(t, retry); err != nil {
+		t.Fatalf("retry handoff result = %v, want success", err)
+	}
+	if monitorCtx.Err() != nil {
+		t.Fatal("timed out handoff stopped the monitor")
 	}
 }
 

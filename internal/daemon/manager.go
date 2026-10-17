@@ -42,6 +42,12 @@ type StepFactory func() []pipeline.Step
 
 var recoveredConfigFetchTimeout = 10 * time.Second
 
+// These bounds leave the caller's IPC deadline enough time to receive the
+// timeout response. The client deadline is carried on the IPC request and is
+// preferred when it is sooner.
+var handoffRequestTimeout = 25 * time.Second
+var handoffRequestSafetyMargin = time.Second
+
 var fetchRecoveredRemoteBranch = git.FetchRemoteBranch
 
 // RunManager tracks active pipeline executors and manages run lifecycle.
@@ -89,6 +95,22 @@ const maxSubscribersPerRun = 32
 
 type handoffRequest struct {
 	result chan error
+}
+
+func handoffContext(parent context.Context) (context.Context, context.CancelFunc) {
+	now := time.Now()
+	deadline := now.Add(handoffRequestTimeout)
+	clientDeadline, ok := parent.Deadline()
+	if !ok {
+		clientDeadline, ok = ipc.RequestDeadline(parent)
+	}
+	if ok {
+		clientDeadline = clientDeadline.Add(-handoffRequestSafetyMargin)
+		if clientDeadline.Before(deadline) {
+			deadline = clientDeadline
+		}
+	}
+	return context.WithDeadline(parent, deadline)
 }
 
 // NewRunManager creates a RunManager. Pass nil for stepFactory to use default steps.
@@ -2335,6 +2357,9 @@ func (m *RunManager) resolveHandoffRequestLocked(runID string, err error) {
 }
 
 func (m *RunManager) HandleHandoff(ctx context.Context, runID string) error {
+	requestCtx, cancel := handoffContext(ctx)
+	defer cancel()
+
 	m.mu.Lock()
 	_, ok := m.cancels[runID]
 	if !ok {
@@ -2395,13 +2420,30 @@ func (m *RunManager) HandleHandoff(ctx context.Context, runID string) error {
 	select {
 	case err := <-req.result:
 		return err
-	case <-ctx.Done():
+	case <-requestCtx.Done():
+		var timeoutErr error
+		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
+			timeoutErr = fmt.Errorf("handoff timed out waiting for CI monitor observation: %w", context.DeadlineExceeded)
+		} else {
+			timeoutErr = fmt.Errorf("handoff timed out because the client disconnected: %w", context.Canceled)
+		}
 		m.mu.Lock()
 		if m.handoffRequests[runID] == req {
 			delete(m.handoffRequests, runID)
+			m.mu.Unlock()
+			return timeoutErr
 		}
 		m.mu.Unlock()
-		return ctx.Err()
+		// A monitor transition won the race with the deadline. Its result is
+		// authoritative when it has already resolved this request. A retry may
+		// have replaced it after cleanup, though; do not wait forever on the
+		// superseded request's channel in that case.
+		select {
+		case err := <-req.result:
+			return err
+		default:
+			return timeoutErr
+		}
 	}
 }
 

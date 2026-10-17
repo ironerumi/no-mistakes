@@ -11,6 +11,35 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 )
 
+func TestRegularHandlerContextCancelsWhenClientDisconnects(t *testing.T) {
+	sock := socketPath(t)
+	srv := startServer(t, sock)
+	observed := make(chan struct{})
+	srv.Handle("slow", func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
+		<-ctx.Done()
+		close(observed)
+		return nil, ctx.Err()
+	})
+
+	conn := rawDial(t, sock)
+	req, err := ipc.NewRequest("slow", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-observed:
+	case <-time.After(time.Second):
+		t.Fatal("regular handler context was not canceled after client disconnect")
+	}
+}
+
 func TestCallTimeoutClassifiesSlowReplySeparatelyFromConnectFailure(t *testing.T) {
 	sock := socketPath(t)
 	srv := startServer(t, sock)
