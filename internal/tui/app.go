@@ -69,7 +69,7 @@ type Model struct {
 	latestVersion    string
 	err              error
 	quitting         bool
-	done             bool // run completed or failed
+	done             bool // run reached a terminal status
 	rerunPending     bool
 	rerunRequestID   uint64
 	showDiff         bool // toggle diff viewer

@@ -38,7 +38,7 @@ const (
 // through it so a newly added terminal status can never drift out of sync.
 // RunCIMonitorInterrupted is terminal - the daemon restarted mid-CI-monitor
 // and the run is never resumed (issue #361) - so it must classify exactly like
-// completed/failed/cancelled.
+// completed/failed/cancelled/handed_off.
 func (s RunStatus) Terminal() bool {
 	switch s {
 	case RunCompleted, RunFailed, RunCancelled, RunCIMonitorInterrupted, RunHandedOff:
