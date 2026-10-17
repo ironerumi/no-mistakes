@@ -13,7 +13,7 @@ import (
 // decisions.
 const MaxBranchDecisionRounds = 20
 
-// BranchDecisionRound is one step round that recorded a human decision,
+// BranchDecisionRound is one step round that recorded a gate response,
 // paired with the run and step it belongs to so a prompt can attribute it.
 type BranchDecisionRound struct {
 	RunID    string
@@ -22,12 +22,12 @@ type BranchDecisionRound struct {
 }
 
 // GetBranchDecisionRounds returns rounds from OTHER runs on the same repo and
-// branch that recorded a human decision, most recent first, bounded by limit.
+// branch that recorded a gate response, most recent first, bounded by limit.
 // The truncated result reports whether older matching rounds exist beyond the
 // returned recency window.
 //
-// It deliberately returns every round whose selection came from a human,
-// declined or partial, and leaves the "does this round actually carry a
+// It deliberately returns every round whose selection came from a gate
+// response, declined or partial, and leaves the "does this round actually carry a
 // decline" question to the caller: the declined set is derived by subtracting
 // selected_finding_ids from findings_json, and that parsing belongs with the
 // finding types rather than in the storage layer.
@@ -91,7 +91,7 @@ func (d *DB) GetBranchDecisionRounds(repoID, branch, excludeRunID string, limit 
 	return decisions, truncated, nil
 }
 
-// SetStepRoundDeclined records that a human resolved this round's approval
+// SetStepRoundDeclined records that a caller resolved this round's approval
 // gate without selecting any finding to fix.
 //
 // The write is conditional on selection_source still being NULL so a decline

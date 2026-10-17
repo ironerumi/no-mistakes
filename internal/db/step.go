@@ -40,7 +40,8 @@ type StepResult struct {
 	// SkipReason records an automatic PR/CI skip, distinct from an explicit
 	// per-run skip. Legacy rows have no recorded reason.
 	SkipReason *string
-	// ResponseOrigin records the caller of the last non-fix gate response.
+	// ResponseOrigin records the caller of the latest gate response stored on
+	// the step. Fix selections store their origin on the answered round.
 	ResponseOrigin types.ResponseOrigin
 }
 

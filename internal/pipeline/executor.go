@@ -173,7 +173,7 @@ func (e *Executor) SetGateReconcileTimings(interval, timeout time.Duration) {
 	}
 }
 
-// Respond sends a user approval action to the currently waiting step.
+// Respond sends a gate response to the currently waiting step.
 // The step parameter must match the step currently awaiting approval.
 // Returns an error if no step is awaiting approval or if the step name doesn't match.
 func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, findingIDs []string) error {
@@ -1933,11 +1933,11 @@ func restorePendingDecision(response approvalResponse, previous, gate string) (a
 // decision instead of leaving no trace.
 //
 // Before this existed, those three resolutions wrote no finding-level state at
-// all, so a round where the human read a blocking finding and said "ship it as
+// all, so a round where the caller read a blocking finding and said "ship it as
 // is" was byte-identical to a round with no findings. Nothing downstream could
 // tell the two apart, and the only durable statement of what the change must do
 // stayed the user-intent prose - which is how a later step could re-derive and
-// re-apply the very change the human had just declined.
+// re-apply the very change the caller had just declined.
 //
 // The decline is stored the way a partial selection already stores one: as the
 // complement of selected_finding_ids. Writing an explicit empty array with the

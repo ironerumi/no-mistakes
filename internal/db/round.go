@@ -10,11 +10,11 @@ import (
 const (
 	RoundSelectionSourceUser    = "user"
 	RoundSelectionSourceAutoFix = "auto_fix"
-	// RoundSelectionSourceUserDeclined records that a human resolved the
+	// RoundSelectionSourceUserDeclined records that a caller resolved the
 	// round's approval gate without selecting any finding to fix: approve,
 	// skip, or abort, or a fix response that declined every finding the gate
 	// showed (--ignore with no --findings). Before this existed, those three resolutions wrote no
-	// finding-level state at all, so "the human declined every finding" and
+	// finding-level state at all, so "the caller declined every finding" and
 	// "there were no findings" were the same row and no later step or run
 	// could tell them apart. The decline itself is still stored the way a
 	// partial selection stores one, as the complement of
@@ -242,7 +242,7 @@ func (d *DB) SetStepRoundSelection(id string, selectedFindingIDs *string, source
 	return nil
 }
 
-// SetStepRoundUserDecision records the user's resolution of a round: which
+// SetStepRoundUserDecision records the caller's resolution of a round: which
 // findings were selected for fix, how the selection was made, and the merged
 // finding list dispatched to the fix agent. The same empty-string versus
 // DeclinedSelectionJSON distinction described on SetStepRoundSelection
