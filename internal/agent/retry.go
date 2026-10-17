@@ -228,6 +228,15 @@ func classifyTransient(err error) (string, bool) {
 	if isTerminalRetryError(msg) {
 		return "", false
 	}
+	// Pi can miss its final output tool or lose a fetch transiently. Keep
+	// these signatures Pi-specific; model-access and schema errors are not
+	// evidence of a recoverable invocation failure.
+	if strings.Contains(msg, "pi did not finish by calling no_mistakes_output alone") {
+		return "pi missing output tool", true
+	}
+	if strings.Contains(msg, "pi exited: fetch failed") {
+		return "pi fetch failed", true
+	}
 	for _, sig := range transientNeedles {
 		if strings.Contains(msg, sig.needle) {
 			return sig.label, true

@@ -86,6 +86,16 @@ func TestClassifyTransient_Positive(t *testing.T) {
 			wantSub: "protocol residue",
 		},
 		{
+			name:    "pi missing output tool",
+			errMsg:  `pi did not finish by calling no_mistakes_output alone`,
+			wantSub: "missing output tool",
+		},
+		{
+			name:    "pi fetch failed",
+			errMsg:  `pi exited: fetch failed`,
+			wantSub: "fetch failed",
+		},
+		{
 			name:    "unfused split bare JSON objects",
 			errMsg:  `pi output parse: split bare JSON objects could not be fused into one valid object`,
 			wantSub: "split",
@@ -129,6 +139,30 @@ func TestClassifyTransient_Negative(t *testing.T) {
 		{
 			name:   "schema validation",
 			errMsg: `JSON output missing required field "summary"`,
+		},
+		{
+			name:   "pi model access unauthorized",
+			errMsg: `pi exited: unable to verify model access: 401 unauthorized`,
+		},
+		{
+			name:   "pi model access denied",
+			errMsg: `pi exited: unable to verify model access: 403 forbidden`,
+		},
+		{
+			name:   "pi schema validation",
+			errMsg: `pi output parse: JSON output missing required field "summary"`,
+		},
+		{
+			name:   "pi fetch quota exhausted",
+			errMsg: `pi exited: fetch failed: quota exhausted`,
+		},
+		{
+			name:   "pi missing output quota exhausted",
+			errMsg: `pi did not finish by calling no_mistakes_output alone: insufficient_quota`,
+		},
+		{
+			name:   "generic fetch failure",
+			errMsg: `fetch failed`,
 		},
 		{
 			name:   "competing verdicts",
@@ -187,6 +221,16 @@ func TestClassifyTransient_NilAndContext(t *testing.T) {
 	}
 	if _, ok := classifyTransient(context.DeadlineExceeded); ok {
 		t.Error("context.DeadlineExceeded should not be transient")
+	}
+	for _, message := range []string{
+		"pi did not finish by calling no_mistakes_output alone",
+		"pi exited: fetch failed",
+	} {
+		for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+			if label, ok := classifyTransient(fmt.Errorf("%s: %w", message, cause)); ok {
+				t.Errorf("%s wrapping %v must remain terminal, got %q", message, cause, label)
+			}
+		}
 	}
 }
 
@@ -255,6 +299,45 @@ func TestRunWithRetry_RetriesTransientThenSucceeds(t *testing.T) {
 		if !strings.Contains(strings.ToLower(c), "transient") || !strings.Contains(strings.ToLower(c), "overloaded") {
 			t.Errorf("chunk[%d]=%q should mention 'transient' and the classification label", i, c)
 		}
+	}
+}
+
+func TestRunWithRetry_PiTransientThenSucceeds(t *testing.T) {
+	previous := transientBackoff
+	transientBackoff = func(ctx context.Context, _ int) error { return ctx.Err() }
+	t.Cleanup(func() { transientBackoff = previous })
+
+	for _, message := range []string{
+		"pi did not finish by calling no_mistakes_output alone",
+		"pi exited: fetch failed",
+	} {
+		t.Run(message, func(t *testing.T) {
+			calls := 0
+			var events []LifecycleEvent
+			var attempts []Attempt
+			firstErr := errors.New(message)
+			want := &Result{Text: "ok"}
+			opts := RunOpts{
+				OnLifecycle: func(e LifecycleEvent) { events = append(events, e) },
+				OnAttempt:   func(a Attempt) { attempts = append(attempts, a) },
+			}
+			got, err := runWithRetry(context.Background(), "pi", opts, 1, classifyTransient, nil, func() (*Result, error) {
+				calls++
+				if calls == 1 {
+					return nil, firstErr
+				}
+				return want, nil
+			})
+			if err != nil || got != want || calls != 2 {
+				t.Fatalf("result = %v, error = %v, calls = %d; want success on second attempt", got, err, calls)
+			}
+			if len(attempts) != 2 || attempts[0].Err != firstErr || attempts[1].Result != want {
+				t.Fatalf("attempt telemetry = %+v", attempts)
+			}
+			if len(events) != 1 || events[0].Agent != "pi" || events[0].Phase != LifecyclePhaseRetry || !strings.Contains(events[0].Message, "attempt 2/2") {
+				t.Fatalf("retry telemetry = %+v", events)
+			}
+		})
 	}
 }
 
