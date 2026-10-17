@@ -350,6 +350,12 @@ func TestAgentCrashRetryPinsTheEffectiveBase(t *testing.T) {
 	}
 }
 
+type usageLimitReachedError struct{}
+
+func (usageLimitReachedError) Error() string { return "provider usage limit reached" }
+
+func (usageLimitReachedError) UsageLimitReached() bool { return true }
+
 func TestRetryableAgentCrash(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -372,6 +378,8 @@ func TestRetryableAgentCrash(t *testing.T) {
 		{"claude schema exhaustion", AgentInvocationFailed(errors.New("error_max_structured_output_retries")), false, false},
 		{"default hang", AgentInvocationFailed(&agentInvocationError{bound: "silent budget", cause: ErrAgentTimeout, adapter: context.Canceled}), false, true},
 		{"quota beyond bounded report", AgentInvocationFailed(&agentInvocationError{message: "timed out; bounded adapter report", bound: "silent budget", cause: ErrAgentTimeout, adapter: errors.New(strings.Repeat("x", 500) + " insufficient_quota")}), false, false},
+		{"Claude session limit", AgentInvocationFailed(errors.New("claude exited: API error status 429: You've hit your session limit · resets later")), false, false},
+		{"adapter usage limit signal", AgentInvocationFailed(usageLimitReachedError{}), false, false},
 		{"configured timeout", AgentInvocationFailed(&agentInvocationError{bound: "silent budget", cause: ErrAgentTimeout}), true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -403,7 +411,6 @@ func TestExecutor_AgentCrashRetryUsesGeneratedDefaultConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.Merge(global, &config.RepoConfig{})
-	cfg.AgentTimeout = 20 * time.Millisecond
 	if cfg.AgentCrashRetries != 1 || cfg.AgentTimeoutsConfigured {
 		t.Fatalf("generated defaults changed retry eligibility: retries=%d configured=%t", cfg.AgentCrashRetries, cfg.AgentTimeoutsConfigured)
 	}
@@ -420,11 +427,18 @@ func TestExecutor_AgentCrashRetryUsesGeneratedDefaultConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
-	ag := &hangingAgent{name: "generated-default-hang", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ag := &hangingAgent{name: "generated-default-hang", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 		calls++
 		if calls == 1 {
-			<-ctx.Done()
-			return nil, ctx.Err()
+			close(started)
+			<-release
+			return nil, &agentInvocationError{
+				message: "agent timed out at the silent budget",
+				bound:   "silent budget; no still-working cap is set",
+				cause:   ErrAgentTimeout,
+			}
 		}
 		return &agent.Result{}, nil
 	}}
@@ -432,7 +446,16 @@ func TestExecutor_AgentCrashRetryUsesGeneratedDefaultConfig(t *testing.T) {
 		_, err := sctx.RunAgent(agent.RunOpts{})
 		return &StepOutcome{}, err
 	}}
-	if err := NewExecutor(database, p, cfg, ag, []Step{step}, nil).Execute(context.Background(), run, repo, work); err != nil || calls != 2 {
+	executor := NewExecutor(database, p, cfg, ag, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- executor.Execute(context.Background(), run, repo, work) }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("generated-default agent did not reach the controllable hang")
+	}
+	close(release)
+	if err := <-done; err != nil || calls != 2 {
 		t.Fatalf("generated default-budget hang = %v, calls=%d; want one retry and two calls", err, calls)
 	}
 }

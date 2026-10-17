@@ -37,10 +37,14 @@ const claudeAPIErrorMessageMaxRunes = 400
 type claudeAPIError struct {
 	Status  int
 	Message string
-	// UsageLimitReached records that the CLI's last rate_limit_event rejected
+	// usageLimitReached records that the CLI's last rate_limit_event rejected
 	// the request. Such a 429 clears at the limit's reset time, not after a
 	// backoff.
-	UsageLimitReached bool
+	usageLimitReached bool
+}
+
+func (e *claudeAPIError) UsageLimitReached() bool {
+	return e.usageLimitReached
 }
 
 func (e *claudeAPIError) Error() string {
@@ -52,7 +56,7 @@ func (e *claudeAPIError) Error() string {
 }
 
 func (e *claudeAPIError) classify() (string, bool) {
-	if e.UsageLimitReached || isTerminalRetryError(strings.ToLower(e.Message)) {
+	if e.usageLimitReached || isTerminalRetryError(strings.ToLower(e.Message)) {
 		return "", false
 	}
 	if status := transientStatusRE.FindString(strconv.Itoa(e.Status)); status != "" {
@@ -212,7 +216,7 @@ func (r *claudeResult) terminalAPIError() *claudeAPIError {
 	return &claudeAPIError{
 		Status:            fields.APIErrorStatus,
 		Message:           strings.Join(strings.Fields(fields.Result), " "),
-		UsageLimitReached: r.usageLimitReached,
+		usageLimitReached: r.usageLimitReached,
 	}
 }
 
