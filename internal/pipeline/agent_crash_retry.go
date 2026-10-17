@@ -31,6 +31,9 @@ func retryableAgentCrash(ctx context.Context, err error, configuredTimeouts bool
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	if !errors.Is(err, ErrAgentInvocationFailed) {
+		return false
+	}
 	var exitErr *exec.ExitError
 	return errors.As(err, &exitErr)
 }
