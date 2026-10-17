@@ -174,6 +174,14 @@ func TestClassifyTransient_Negative(t *testing.T) {
 			errMsg: `pi exited: fetch failed: quota exhausted`,
 		},
 		{
+			name:   "pi fetch permission denied",
+			errMsg: `pi exited: exit status 1: fetch failed: permission denied`,
+		},
+		{
+			name:   "pi fetch unauthorized",
+			errMsg: `pi exited: exit status 1: fetch failed: 401 unauthorized`,
+		},
+		{
 			name:   "pi missing output quota exhausted",
 			errMsg: `pi did not finish by calling no_mistakes_output alone: insufficient_quota`,
 		},
@@ -355,6 +363,28 @@ func TestRunWithRetry_PiTransientThenSucceeds(t *testing.T) {
 				t.Fatalf("retry telemetry = %+v", events)
 			}
 		})
+	}
+}
+
+func TestRunWithRetry_ProtocolResidueTicket401StillRetries(t *testing.T) {
+	previous := transientBackoff
+	transientBackoff = func(ctx context.Context, _ int) error { return ctx.Err() }
+	t.Cleanup(func() { transientBackoff = previous })
+
+	calls := 0
+	residueErr := errors.New(`pi output parse: invalid character '<' after top-level value (output snippet: "{\"summary\":\"ticket 401\"}<html>")`)
+	result, err := runWithRetry(context.Background(), "pi", RunOpts{}, 1, classifyTransient, nil, func() (*Result, error) {
+		calls++
+		if calls == 1 {
+			return nil, residueErr
+		}
+		return &Result{Text: "ok"}, nil
+	})
+	if err != nil || result == nil || result.Text != "ok" {
+		t.Fatalf("result = %+v, error = %v; want retry success", result, err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want one retry", calls)
 	}
 }
 
