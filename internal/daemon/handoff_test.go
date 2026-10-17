@@ -2,10 +2,13 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -14,6 +17,10 @@ import (
 )
 
 func newHandoffFixture(t *testing.T, ready bool) (*db.DB, *db.Run, *RunManager, context.Context, context.CancelCauseFunc, chan struct{}) {
+	return newHandoffFixtureWithPRState(t, ready, false)
+}
+
+func newHandoffFixtureWithPRState(t *testing.T, ready, nullPRState bool) (*db.DB, *db.Run, *RunManager, context.Context, context.CancelCauseFunc, chan struct{}) {
 	t.Helper()
 	p := paths.WithRoot(t.TempDir())
 	if err := p.EnsureDirs(); err != nil {
@@ -41,6 +48,13 @@ func newHandoffFixture(t *testing.T, ready bool) (*db.DB, *db.Run, *RunManager, 
 	must(database.UpdateRunStatus(run.ID, types.RunRunning))
 	must(database.UpdateRunPRURL(run.ID, "https://example.test/o/r/pull/1"))
 	must(database.UpdateRunPRState(run.ID, "open"))
+	if nullPRState {
+		sqlDB, err := sql.Open("sqlite", p.DB())
+		must(err)
+		defer sqlDB.Close()
+		_, err = sqlDB.Exec(`UPDATE runs SET pr_state = NULL WHERE id = ?`, run.ID)
+		must(err)
+	}
 	must(database.SetRunCIReady(run.ID, ready))
 	step, err := database.InsertStepResult(run.ID, types.StepCI)
 	if err != nil {
@@ -88,6 +102,15 @@ func TestHandleHandoffAfterMonitorExitRefusesImmediately(t *testing.T) {
 	m.transitionCIMonitorLifecycle(run.ID, false)
 	if err := m.HandleHandoff(context.Background(), run.ID); err == nil || !strings.Contains(err.Error(), "actively monitoring") {
 		t.Fatalf("handoff error = %v, want immediate monitor refusal", err)
+	}
+}
+
+func TestHandleHandoffUnknownPRStateRefuses(t *testing.T) {
+	_, run, m, _, cancel, _ := newHandoffFixtureWithPRState(t, true, true)
+	defer cancel(context.Canceled)
+
+	if err := m.HandleHandoff(context.Background(), run.ID); err == nil || !strings.Contains(err.Error(), "open PR") {
+		t.Fatalf("handoff error = %v, want unknown PR-state refusal", err)
 	}
 }
 
