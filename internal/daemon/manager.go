@@ -51,6 +51,7 @@ type RunManager struct {
 	cancels         map[string]context.CancelCauseFunc // runID → cancel function with cause
 	dones           map[string]chan struct{}           // runID → closed when goroutine exits
 	handoffRequests map[string]*handoffRequest         // runID → pending monitor request
+	ciMonitorActive map[string]bool                    // runID → CI monitor accepts observations
 	ciWakes         map[string]chan struct{}           // runID → CI poll wake signal
 	wg              sync.WaitGroup                     // tracks background run goroutines
 	shuttingDown    atomic.Bool                        // prevents new runs during shutdown
@@ -100,6 +101,7 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		cancels:         make(map[string]context.CancelCauseFunc),
 		dones:           make(map[string]chan struct{}),
 		handoffRequests: make(map[string]*handoffRequest),
+		ciMonitorActive: make(map[string]bool),
 		ciWakes:         make(map[string]chan struct{}),
 		db:              database,
 		paths:           p,
@@ -423,6 +425,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
 	executor.SetCIObservationTransition(m.transitionCIObservation)
+	executor.SetCIMonitorLifecycle(m.transitionCIMonitorLifecycle)
 	executor.SetCIWake(m.ciWake)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
@@ -472,6 +475,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			delete(m.dones, plan.run.ID)
 			m.resolveHandoffRequestLocked(plan.run.ID, errors.New("run ended before handoff"))
 			delete(m.ciWakes, plan.run.ID)
+			delete(m.ciMonitorActive, plan.run.ID)
 			m.mu.Unlock()
 		}()
 
@@ -1762,6 +1766,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
 	executor.SetCIObservationTransition(m.transitionCIObservation)
+	executor.SetCIMonitorLifecycle(m.transitionCIMonitorLifecycle)
 	executor.SetCIWake(m.ciWake)
 	executor.SetForgeContext(forgeCtx)
 	executor.SetSkippedSteps(skipSteps)
@@ -1842,6 +1847,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			delete(m.dones, run.ID)
 			m.resolveHandoffRequestLocked(run.ID, errors.New("run ended before handoff"))
 			delete(m.ciWakes, run.ID)
+			delete(m.ciMonitorActive, run.ID)
 			m.mu.Unlock()
 		}()
 
@@ -2306,6 +2312,15 @@ func (m *RunManager) transitionCIObservation(runID string, withdrawal, completes
 	return persist()
 }
 
+func (m *RunManager) transitionCIMonitorLifecycle(runID string, active bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ciMonitorActive[runID] = active
+	if !active {
+		m.resolveHandoffRequestLocked(runID, errors.New("CI monitor is no longer active"))
+	}
+}
+
 func (m *RunManager) ciWake(runID string) <-chan struct{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2326,6 +2341,10 @@ func (m *RunManager) HandleHandoff(ctx context.Context, runID string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("no active CI monitor for run %s; use axi status to inspect the run", runID)
 	}
+	if !m.ciMonitorActive[runID] {
+		m.mu.Unlock()
+		return fmt.Errorf("handoff requires an actively monitoring CI step; use axi run to resolve gates, or axi abort to discard the run")
+	}
 	if m.handoffRequests[runID] != nil {
 		m.mu.Unlock()
 		return fmt.Errorf("handoff already requested for run %s; use axi status to inspect the run", runID)
@@ -2340,6 +2359,10 @@ func (m *RunManager) HandleHandoff(ctx context.Context, runID string) error {
 		return fmt.Errorf("handoff requires an open PR with checks-passed; use axi run to wait for green CI, or axi abort to discard the run")
 	}
 	if run.PRState != nil && *run.PRState != "open" {
+		m.mu.Unlock()
+		return fmt.Errorf("handoff requires an open PR with checks-passed; use axi run to wait for green CI, or axi abort to discard the run")
+	}
+	if run.CIReadyAt == nil {
 		m.mu.Unlock()
 		return fmt.Errorf("handoff requires an open PR with checks-passed; use axi run to wait for green CI, or axi abort to discard the run")
 	}

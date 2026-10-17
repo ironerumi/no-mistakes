@@ -476,7 +476,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	consecutiveCheckErrs := 0
 	consecutiveBotCommentErrs := 0
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
-		clearCIMonitorReady(sctx)
+		if err := clearCIMonitorReady(sctx); err != nil {
+			return nil, err
+		}
 		sctx.Log("CI timeout reached")
 		var outcome *pipeline.StepOutcome
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {
@@ -560,7 +562,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		prStateKnown := true
 		state, err := host.GetPRState(ctx, pr)
 		if err != nil && pluginPollFailsStep(err) {
-			clearCIMonitorReady(sctx)
+			if err := clearCIMonitorReady(sctx); err != nil {
+				return nil, err
+			}
 			return nil, err
 		}
 		if err != nil {
@@ -595,7 +599,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		if host.Capabilities().MergeableState {
 			mergeState, mergeErr := host.GetMergeableState(ctx, pr)
 			if mergeErr != nil && pluginPollFailsStep(mergeErr) {
-				clearCIMonitorReady(sctx)
+				if err := clearCIMonitorReady(sctx); err != nil {
+					return nil, err
+				}
 				return nil, mergeErr
 			}
 			if mergeErr != nil {
@@ -622,7 +628,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		pr.HeadSHA = sctx.Run.HeadSHA
 		checks, err := host.GetChecks(ctx, pr)
 		if err != nil && pluginPollFailsStep(err) {
-			clearCIMonitorReady(sctx)
+			if err := clearCIMonitorReady(sctx); err != nil {
+				return nil, err
+			}
 			return nil, err
 		}
 		if err != nil {
@@ -642,7 +650,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					return nil, err
 				}
 			} else {
-				clearCIMonitorReady(sctx)
+				if err := clearCIMonitorReady(sctx); err != nil {
+					return nil, err
+				}
 				lastMonitorLog = ""
 				sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
 				consecutiveCheckErrs++
@@ -711,7 +721,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// The published head moved, so this run never delivered the
 					// commit whose checks were observed: nothing here may leave
 					// a ready-to-merge signal behind on the way out.
-					clearCIMonitorReady(sctx)
+					if err := clearCIMonitorReady(sctx); err != nil {
+						return nil, err
+					}
 					return rerunOutcome, nil
 				}
 				rerunIssued = issued
@@ -822,7 +834,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				s.lastFixedCompletedAt = nil
 				switch {
 				case !prStateKnown || !mergeabilityKnown:
-					clearCIMonitorReady(sctx)
+					if err := clearCIMonitorReady(sctx); err != nil {
+						return nil, err
+					}
 					lastMonitorLog = ""
 				case readinessPending:
 					// Checks are (re-)running with no failures yet. Surface this
@@ -841,7 +855,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// Without that declaration, keep waiting - delayed registration
 					// is common and must never look green. Elapsed time is not
 					// evidence; there is no grace-period promotion path.
-					clearCIMonitorReady(sctx)
+					if err := clearCIMonitorReady(sctx); err != nil {
+						return nil, err
+					}
 					lastMonitorLog = ""
 					sctx.Log("no CI checks reported yet, waiting for checks to register...")
 				case len(checks) == 0 || allChecksPassed(checks):
@@ -854,11 +870,15 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// with no checks at all reads them the same way.
 					botFindings, botErr := s.greenReviewBotFindings(sctx, host, pr, checks)
 					if botErr != nil && pluginPollFailsStep(botErr) {
-						clearCIMonitorReady(sctx)
+						if err := clearCIMonitorReady(sctx); err != nil {
+							return nil, err
+						}
 						return nil, botErr
 					}
 					if botErr != nil {
-						clearCIMonitorReady(sctx)
+						if err := clearCIMonitorReady(sctx); err != nil {
+							return nil, err
+						}
 						lastMonitorLog = ""
 						botCommentReadFailed = true
 						consecutiveBotCommentErrs++
@@ -870,7 +890,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						break
 					}
 					if len(botFindings.Items) > 0 {
-						clearCIMonitorReady(sctx)
+						if err := clearCIMonitorReady(sctx); err != nil {
+							return nil, err
+						}
 						sctx.DeferredFindings = ""
 						s.observedCompletedAt = terminalFailureCompletionTimes(checks)
 						sctx.Log(fmt.Sprintf("issues detected: %s", botFindings.Summary))
@@ -894,7 +916,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 							}
 							break
 						}
-						clearCIMonitorReady(sctx)
+						if err := clearCIMonitorReady(sctx); err != nil {
+							return nil, err
+						}
 						sctx.DeferredFindings = ""
 						findings := ciObservationFindings(ciIssues{provider: host.Provider(), checks: checks, behindBase: true})
 						sctx.Log(fmt.Sprintf("issues detected: %s", findings.Summary))
@@ -909,7 +933,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						return nil, err
 					}
 				default:
-					clearCIMonitorReady(sctx)
+					if err := clearCIMonitorReady(sctx); err != nil {
+						return nil, err
+					}
 					if err := logStatus(ciChecksRunningMsg); err != nil {
 						return nil, err
 					}
@@ -950,20 +976,15 @@ func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) (s
 		ready := message == ciChecksPassedMsg || message == ciNoChecksPassedMsg
 		declaredNoCI := message == ciNoChecksPassedMsg
 		if err := setCIMonitorReadiness(sctx, ready, declaredNoCI); err != nil {
-			if errors.Is(err, pipeline.ErrHandoff) {
-				return previous, err
-			}
-			sctx.Log(fmt.Sprintf("warning: could not persist CI readiness: %v", err))
+			return previous, err
 		}
 		sctx.Log(message)
 	}
 	return message, nil
 }
 
-func clearCIMonitorReady(sctx *pipeline.StepContext) {
-	if err := setCIMonitorReadiness(sctx, false, false); err != nil {
-		sctx.Log(fmt.Sprintf("warning: could not clear CI readiness: %v", err))
-	}
+func clearCIMonitorReady(sctx *pipeline.StepContext) error {
+	return setCIMonitorReadiness(sctx, false, false)
 }
 
 func setCIMonitorPRState(sctx *pipeline.StepContext, state string) error {
