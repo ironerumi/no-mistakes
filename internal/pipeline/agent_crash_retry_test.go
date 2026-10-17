@@ -432,19 +432,15 @@ func TestExecutor_AgentCrashRetryUsesGeneratedDefaultConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.AgentTimeout = 5 * time.Second
 	calls := 0
-	started := make(chan struct{})
-	release := make(chan struct{})
-	ag := &hangingAgent{name: "generated-default-hang", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+	cancelled := make(chan struct{})
+	ag := &hangingAgent{name: "generated-default-hang", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
 		calls++
 		if calls == 1 {
-			close(started)
-			<-release
-			return nil, &agentInvocationError{
-				message: "agent timed out at the silent budget",
-				bound:   "silent budget; no still-working cap is set",
-				cause:   ErrAgentTimeout,
-			}
+			<-ctx.Done()
+			close(cancelled)
+			return nil, ctx.Err()
 		}
 		return &agent.Result{}, nil
 	}}
@@ -456,11 +452,10 @@ func TestExecutor_AgentCrashRetryUsesGeneratedDefaultConfig(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- executor.Execute(context.Background(), run, repo, work) }()
 	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("generated-default agent did not reach the controllable hang")
+	case <-cancelled:
+	case <-time.After(15 * time.Second):
+		t.Fatal("generated-default timeout did not cancel the first invocation")
 	}
-	close(release)
 	if err := <-done; err != nil || calls != 2 {
 		t.Fatalf("generated default-budget hang = %v, calls=%d; want one retry and two calls", err, calls)
 	}
