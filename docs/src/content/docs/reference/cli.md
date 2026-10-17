@@ -494,7 +494,7 @@ End the current branch's green CI monitor when handing its open PR to human revi
 no-mistakes axi handoff
 ```
 
-The daemon accepts this only while the CI step is actively monitoring an open PR and has persisted `checks-passed` readiness (including trusted declared-no-CI readiness). Pending or failed checks, approval gates, and runs without an open PR are refused with guidance to continue with `axi run`. Successful handoff waits for the run to stop and records terminal `handed_off`, rendered as the `handed-off` drive outcome. It neither merges nor closes the PR, and it does not claim a merge occurred. Like other branch-scoped mutations, it must be run from the repository's current branch.
+The daemon accepts this only while the CI step is actively monitoring an open PR and has persisted `checks-passed` readiness (including trusted declared-no-CI readiness). Pending or failed checks, approval gates, and runs without an open PR are refused with guidance to continue with `axi run`. Successful handoff waits for the run to stop and records terminal `handed_off`, rendered as the `handed-off` drive outcome. It neither merges nor closes the PR, and it does not claim a merge occurred. The open/green check is a snapshot at the monitor evaluation. Like other branch-scoped mutations, it must be run from the repository's current branch.
 
 Use `axi abort` to discard a run instead; its cancellation behavior is unchanged. Handoff is explicit and opt-in, not an automatic finish-on-green policy. If the run has already completed, no active monitor remains to hand off.
 
