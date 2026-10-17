@@ -368,7 +368,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	}
 	pr := &scm.PR{Number: prNumber, URL: prURL}
 	if retryRefusal {
-		if err := clearCIMonitorReady(sctx); err != nil {
+		if err := clearCIMonitorReadyForIssues(sctx); err != nil {
 			return nil, err
 		}
 		repair, err := s.retryProtectedPathRepair(sctx)
@@ -472,12 +472,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	mergeabilityBlockedReason := ""
 	var timeoutFailingChecks []scm.CheckTarget
 	timeoutMergeConflict := false
-	lastMonitorLog := ""
+	lastMonitorLog := ciMonitorStatus{}
 	consecutiveCheckErrs := 0
 	consecutiveBotCommentErrs := 0
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
-		if err := clearCIMonitorReady(sctx); err != nil {
-			return nil, err
+		if handoffPending(sctx) {
+			if err := clearCIMonitorReady(sctx); err != nil {
+				return nil, err
+			}
 		}
 		sctx.Log("CI timeout reached")
 		var outcome *pipeline.StepOutcome
@@ -653,7 +655,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				if err := clearCIMonitorReady(sctx); err != nil {
 					return nil, err
 				}
-				lastMonitorLog = ""
+				lastMonitorLog = ciMonitorStatus{}
 				sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
 				consecutiveCheckErrs++
 				// A provider read that keeps failing (e.g. gh < v2.50 rejecting
@@ -767,7 +769,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			timeoutFailingChecks = terminalCheckTargetsForNames(checks, mergeCheckNames(reportedIssues, awaitingRerun))
 
 			if hasIssues || len(awaitingRerun) > 0 {
-				if err := clearCIMonitorReady(sctx); err != nil {
+				if err := clearCIMonitorReadyForIssues(sctx); err != nil {
 					return nil, err
 				}
 			}
@@ -784,14 +786,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				// Issue handling waits only for checks that can still complete on
 				// their own. A cancelled check whose rerun budget is exhausted must
 				// reach the approval gate instead of waiting forever.
-				lastMonitorLog = ""
+				lastMonitorLog = ciMonitorStatus{}
 				if pendingCheckMatchesLastFixed(checks, s.lastFixedChecks) {
 					s.lastFixedChecks = ""
 					s.lastFixedCompletedAt = nil
 				}
 				sctx.Log("issues detected but checks still pending, waiting for all checks to complete...")
 			} else if hasIssues {
-				lastMonitorLog = ""
+				lastMonitorLog = ciMonitorStatus{}
 				if s.lastRepairStillUnverified(checks, mergeConflict) {
 					// The provider has not re-run the checks the last
 					// published repair targeted: the failures on screen are
@@ -837,7 +839,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					if err := clearCIMonitorReady(sctx); err != nil {
 						return nil, err
 					}
-					lastMonitorLog = ""
+					lastMonitorLog = ciMonitorStatus{}
 				case readinessPending:
 					// Checks are (re-)running with no failures yet. Surface this
 					// so a PR that passed checks and starts re-running clears the
@@ -858,7 +860,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					if err := clearCIMonitorReady(sctx); err != nil {
 						return nil, err
 					}
-					lastMonitorLog = ""
+					lastMonitorLog = ciMonitorStatus{}
 					sctx.Log("no CI checks reported yet, waiting for checks to register...")
 				case len(checks) == 0 || allChecksPassed(checks):
 					// Under ci.review_bot_comments: always, a review bot that
@@ -879,7 +881,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						if err := clearCIMonitorReady(sctx); err != nil {
 							return nil, err
 						}
-						lastMonitorLog = ""
+						lastMonitorLog = ciMonitorStatus{}
 						botCommentReadFailed = true
 						consecutiveBotCommentErrs++
 						sctx.Log(fmt.Sprintf("warning: could not read review bot comments: %v", botErr))
@@ -954,7 +956,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			return nil, err
 		}
 		if woken {
-			lastMonitorLog = ""
+			lastMonitorLog = ciMonitorStatus{}
 		}
 	}
 }
@@ -971,23 +973,45 @@ func ciWaitingMessage(checks []scm.Check) string {
 	return ciChecksRunningMsg
 }
 
-// Readiness writes remain best-effort for monitoring. The daemon resolves any
-// pending handoff with the write error; only a committed handoff stops the step.
-func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) (string, error) {
-	if message != previous {
+// Keep logging independent of persistence so a failed write retries silently.
+type ciMonitorStatus struct {
+	persisted string
+	logged    string
+}
+
+func logCIMonitorStatus(sctx *pipeline.StepContext, message string, previous ciMonitorStatus) (ciMonitorStatus, error) {
+	if message != previous.persisted {
+		pending := handoffPending(sctx)
 		ready := message == ciChecksPassedMsg || message == ciNoChecksPassedMsg
 		declaredNoCI := message == ciNoChecksPassedMsg
 		if err := setCIMonitorReadiness(sctx, ready, declaredNoCI); err != nil {
 			if errors.Is(err, pipeline.ErrHandoff) {
 				return previous, err
 			}
-			sctx.Log(fmt.Sprintf("warning: could not persist CI readiness: %v", err))
-			sctx.Log(message)
+			if message != previous.logged || pending {
+				sctx.Log(fmt.Sprintf("warning: could not persist CI readiness: %v", err))
+				sctx.Log(message)
+			}
+			previous.logged = message
 			return previous, nil
 		}
-		sctx.Log(message)
+		if message != previous.logged || pending {
+			sctx.Log(message)
+		}
 	}
-	return message, nil
+	return ciMonitorStatus{persisted: message, logged: message}, nil
+}
+
+func handoffPending(sctx *pipeline.StepContext) bool {
+	return sctx.HandoffPending != nil && sctx.HandoffPending()
+}
+
+// These two issue paths failed closed before handoff was introduced.
+func clearCIMonitorReadyForIssues(sctx *pipeline.StepContext) error {
+	if handoffPending(sctx) {
+		return clearCIMonitorReady(sctx)
+	}
+	return setCIMonitorReadiness(sctx, false, false)
 }
 
 func clearCIMonitorReady(sctx *pipeline.StepContext) error {

@@ -104,6 +104,7 @@ type Executor struct {
 	ciObservationTransition func(runID string, withdrawal, completes bool, reason string, persist func() error) error
 	ciMonitorLifecycle      func(runID string, active bool)
 	ciWake                  func(runID string) <-chan struct{}
+	handoffPending          func(runID string) bool
 }
 
 // SetOnPRMerged registers a best-effort hook invoked after a merged PR state
@@ -137,6 +138,10 @@ func (e *Executor) SetCIWake(fn func(runID string) <-chan struct{}) {
 		return
 	}
 	e.ciWake = fn
+}
+
+func (e *Executor) SetHandoffPending(fn func(runID string) bool) {
+	e.handoffPending = fn
 }
 
 // SetForgeContext configures the immutable provider context used by every
@@ -1403,6 +1408,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		CIWake:             ciWake,
 		MarkRunning:        markRunning,
 		OnPRMerged:         e.onPRMerged,
+	}
+	if e.handoffPending != nil {
+		sctx.HandoffPending = func() bool { return e.handoffPending(run.ID) }
 	}
 	sctx.SetCIReadiness = func(ready, declaredNoCI bool) error {
 		declaredNoCI = ready && declaredNoCI

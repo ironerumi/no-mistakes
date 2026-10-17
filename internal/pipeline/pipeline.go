@@ -143,6 +143,8 @@ type StepContext struct {
 	// decisions such as handoff. Embeddings leave it nil and use the local DB
 	// write path.
 	SetCIReadiness func(ready, declaredNoCI bool) error
+	// HandoffPending reports an explicit request waiting on this monitor.
+	HandoffPending func() bool
 	// SetPRState is the daemon-owned transition boundary for CI monitor PR
 	// lifecycle observations. Embeddings leave it nil and use the local DB
 	// write path.

@@ -449,6 +449,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	executor.SetCIObservationTransition(m.transitionCIObservation)
 	executor.SetCIMonitorLifecycle(m.transitionCIMonitorLifecycle)
 	executor.SetCIWake(m.ciWake)
+	executor.SetHandoffPending(m.handoffPending)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -1790,6 +1791,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	executor.SetCIObservationTransition(m.transitionCIObservation)
 	executor.SetCIMonitorLifecycle(m.transitionCIMonitorLifecycle)
 	executor.SetCIWake(m.ciWake)
+	executor.SetHandoffPending(m.handoffPending)
 	executor.SetForgeContext(forgeCtx)
 	executor.SetSkippedSteps(skipSteps)
 	if retry != nil {
@@ -2341,6 +2343,12 @@ func (m *RunManager) transitionCIMonitorLifecycle(runID string, active bool) {
 	if !active {
 		m.resolveHandoffRequestLocked(runID, errors.New("CI monitor is no longer active"))
 	}
+}
+
+func (m *RunManager) handoffPending(runID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.handoffRequests[runID] != nil
 }
 
 func (m *RunManager) ciWake(runID string) <-chan struct{} {

@@ -89,12 +89,13 @@ func TestCIStep_ReadinessWriteFailureWarnsAndKeepsMonitoring(t *testing.T) {
 	}
 }
 
-func TestCIStep_ReadinessClearFailureDoesNotAbortIssueObservation(t *testing.T) {
+func TestCIStep_ReadinessClearFailureWithPendingHandoffKeepsIssueObservation(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
 	prURL := "https://github.com/test/repo/pull/42"
 	sctx.Run.PRURL = &prURL
 	sctx.Env = fakeCIGH(t, "OPEN", `[{"name":"build","state":"FAILURE","bucket":"fail"}]`)
+	sctx.HandoffPending = func() bool { return true }
 	sctx.Config.CITimeout = time.Minute
 	writeErr := errors.New("readiness write failed")
 	sctx.SetCIReadiness = func(bool, bool) error { return writeErr }
@@ -125,7 +126,7 @@ func TestCIStep_ReadinessWriteFailureRetriesOnNextPoll(t *testing.T) {
 	var readinessWrites int
 	sctx.SetCIReadiness = func(ready, declaredNoCI bool) error {
 		readinessWrites++
-		if readinessWrites == 1 {
+		if readinessWrites <= 3 {
 			if !ready || declaredNoCI {
 				t.Fatalf("first readiness write = (%t, %t), want green readiness", ready, declaredNoCI)
 			}
@@ -140,17 +141,25 @@ func TestCIStep_ReadinessWriteFailureRetriesOnNextPoll(t *testing.T) {
 	stop := errors.New("monitor reached next poll")
 	step := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error {
 		polls++
-		if polls == 1 {
+		if polls < 4 {
 			return nil
 		}
 		return stop
 	}}
 
+	var logs []string
+	sctx.Log = func(message string) { logs = append(logs, message) }
 	if _, err := step.Execute(sctx); !errors.Is(err, stop) {
 		t.Fatalf("monitor error = %v, want next poll", err)
 	}
-	if readinessWrites != 2 {
-		t.Fatalf("readiness writes = %d, want failed write plus retry", readinessWrites)
+	if readinessWrites != 4 {
+		t.Fatalf("readiness writes = %d, want three failed writes plus recovery", readinessWrites)
+	}
+	if got := strings.Count(strings.Join(logs, "\n"), "warning: could not persist CI readiness:"); got != 1 {
+		t.Fatalf("warning count = %d, want 1; logs: %v", got, logs)
+	}
+	if got := strings.Count(strings.Join(logs, "\n"), ciChecksPassedMsg); got != 1 {
+		t.Fatalf("status count = %d, want 1; logs: %v", got, logs)
 	}
 }
 
