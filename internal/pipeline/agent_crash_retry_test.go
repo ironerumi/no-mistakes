@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -49,7 +50,7 @@ func TestExecutor_AgentCrashRetry(t *testing.T) {
 			ag := &hangingAgent{name: "crashing", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 				calls++
 				if calls <= tc.failures {
-					return nil, errors.New("agent process exited: exit status 1")
+					return nil, processExitError{"agent process exited: exit status 1"}
 				}
 				return &agent.Result{}, nil
 			}}
@@ -164,7 +165,7 @@ func TestExecutor_AgentCrashRetryRefusesChangedProof(t *testing.T) {
 					writeTestFile(t, filepath.Join(work, ".git"), "local-ignore", "partial.txt\n")
 					writeTestFile(t, work, "partial.txt", "unfinished")
 				}
-				return nil, &agentInvocationFailure{err: errors.New("agent process crashed")}
+				return nil, &agentInvocationFailure{err: processExitError{"agent process crashed"}}
 			}}
 			if change == "initial dirty" {
 				writeTestFile(t, work, "README.md", "already dirty")
@@ -224,7 +225,7 @@ func TestCrashRetryPhases(t *testing.T) {
 						return nil, err
 					}
 				}
-				return nil, &agentInvocationFailure{err: errors.New("crash")}
+				return nil, &agentInvocationFailure{err: processExitError{"crash"}}
 			}}
 			executor := &Executor{crashRetryBaseSHA: "original"}
 			budget := 3
@@ -302,7 +303,7 @@ func TestExecutor_AgentCrashRetryDisabledAfterRecovery(t *testing.T) {
 	calls := 0
 	document := &adaptiveCallStep{name: types.StepDocument, fn: func(*StepContext) (*StepOutcome, error) {
 		calls++
-		return nil, &agentInvocationFailure{err: errors.New("agent crashed")}
+		return nil, &agentInvocationFailure{err: processExitError{"agent crashed"}}
 	}}
 	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, nil, []Step{newPassStep(types.StepReview), newPassStep(types.StepTest), document}, nil)
 	executor.onEvent = func(event ipc.Event) {
@@ -365,11 +366,11 @@ func (usageLimitReachedError) Error() string { return "provider usage limit reac
 
 func (usageLimitReachedError) UsageLimitReached() bool { return true }
 
-type terminalProviderError struct{ message string }
+type processExitError struct{ message string }
 
-func (e terminalProviderError) Error() string { return e.message }
+func (e processExitError) Error() string { return e.message }
 
-func (terminalProviderError) TerminalProviderError() bool { return true }
+func (processExitError) Unwrap() error { return &exec.ExitError{} }
 
 func TestRetryableAgentCrash(t *testing.T) {
 	for _, tc := range []struct {
@@ -378,20 +379,20 @@ func TestRetryableAgentCrash(t *testing.T) {
 		configured bool
 		want       bool
 	}{
-		{"shared invocation cause", &agentInvocationFailure{err: errors.New("exit status 1")}, false, true},
-		{"unclassified error", errors.New("exit status 1"), false, false},
-		{"unparseable", agent.RejectStructuredOutput(errors.New("invalid JSON")), false, true},
-		{"structured output field names", &agentInvocationFailure{err: agent.RejectStructuredOutput(errors.New(`structured output: {"author":"token"}`))}, false, true},
-		{"auth", &agentInvocationFailure{err: terminalProviderError{"provider authentication failed"}}, false, false},
-		{"login", &agentInvocationFailure{err: terminalProviderError{"login required"}}, false, false},
-		{"api key", &agentInvocationFailure{err: terminalProviderError{"invalid API key"}}, false, false},
-		{"credit", &agentInvocationFailure{err: terminalProviderError{"insufficient credit balance"}}, false, false},
-		{"forbidden", &agentInvocationFailure{err: terminalProviderError{"403 forbidden"}}, false, false},
-		{"quota", &agentInvocationFailure{err: terminalProviderError{"insufficient_quota"}}, false, false},
-		{"claude schema exhaustion", &agentInvocationFailure{err: terminalProviderError{"error_max_structured_output_retries"}}, false, false},
+		{"process exit", &agentInvocationFailure{err: processExitError{"agent exited: exit status 1"}}, false, true},
+		{"unclassified error", &agentInvocationFailure{err: errors.New("exit status 1")}, false, false},
+		{"unparseable", agent.RejectStructuredOutput(errors.New("invalid JSON")), false, false},
+		{"structured output field names", &agentInvocationFailure{err: agent.RejectStructuredOutput(errors.New(`structured output: {"author":"token"}`))}, false, false},
+		{"auth", &agentInvocationFailure{err: errors.New("provider authentication failed")}, false, false},
+		{"login", &agentInvocationFailure{err: errors.New("login required")}, false, false},
+		{"api key", &agentInvocationFailure{err: errors.New("invalid API key")}, false, false},
+		{"credit", &agentInvocationFailure{err: errors.New("insufficient credit balance")}, false, false},
+		{"forbidden", &agentInvocationFailure{err: errors.New("403 forbidden")}, false, false},
+		{"quota", &agentInvocationFailure{err: errors.New("insufficient_quota")}, false, false},
+		{"claude schema exhaustion", &agentInvocationFailure{err: errors.New("error_max_structured_output_retries")}, false, false},
 		{"default hang", &agentInvocationError{bound: "silent budget", cause: ErrAgentTimeout, adapter: context.Canceled}, false, true},
-		{"quota beyond bounded report", &agentInvocationError{message: "timed out; bounded adapter report", bound: "silent budget", cause: ErrAgentTimeout, adapter: terminalProviderError{strings.Repeat("x", 500) + " insufficient_quota"}}, false, false},
-		{"Claude session limit", &agentInvocationFailure{err: terminalProviderError{"claude exited: API error status 429: You've hit your session limit · resets later"}}, false, false},
+		{"quota beyond bounded report", &agentInvocationError{message: "timed out; bounded adapter report", bound: "silent budget", cause: ErrAgentTimeout, adapter: errors.Join(usageLimitReachedError{}, errors.New(strings.Repeat("x", 500)+" insufficient_quota"))}, false, false},
+		{"Claude session limit", &agentInvocationFailure{err: errors.New("claude exited: API error status 429: You've hit your session limit · resets later")}, false, false},
 		{"adapter usage limit signal", &agentInvocationFailure{err: usageLimitReachedError{}}, false, false},
 		{"configured timeout", &agentInvocationError{bound: "silent budget", cause: ErrAgentTimeout}, true, false},
 	} {
@@ -403,7 +404,7 @@ func TestRetryableAgentCrash(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if retryableAgentCrash(ctx, &agentInvocationFailure{err: errors.New("crash")}, false) {
+	if retryableAgentCrash(ctx, &agentInvocationFailure{err: processExitError{"crash"}}, false) {
 		t.Fatal("cancelled run retried")
 	}
 }
