@@ -19,35 +19,37 @@ func newAxiHandoffCmd() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			env, err := openAxiDaemonEnv()
-			if err != nil {
-				return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
-			}
-			defer env.close()
-			branch, err := git.CurrentBranch(cmd.Context(), ".")
-			if err != nil {
-				return emitError(cmd, 1, fmt.Sprintf("get current branch: %v", err))
-			}
-			var active ipc.GetActiveRunResult
-			if err := env.client.Call(ipc.MethodGetActiveRun, activeRunLookupParams(env.repo.ID, branch), &active); err != nil {
-				return emitError(cmd, 1, fmt.Sprintf("get active run: %v", err))
-			}
-			if active.Run == nil {
-				return emitError(cmd, 1, "no active CI monitor on this branch; use axi status to inspect the run")
-			}
-			var result ipc.CancelRunResult
-			if err := env.client.Call(ipc.MethodHandoffRun, &ipc.CancelRunParams{RunID: active.Run.ID}, &result); err != nil {
-				return emitError(cmd, 1, fmt.Sprintf("handoff run: %v", err))
-			}
-			final, confirmed, reason := waitForTerminalRun(cmd.Context(), env.client, active.Run.ID, abortStateWaitTimeout)
-			if !confirmed {
-				return emitError(cmd, 1, "handoff requested but terminal state unconfirmed: "+reason, "Use axi status to inspect the run")
-			}
-			if final.Status != types.RunHandedOff {
-				return emitError(cmd, 1, fmt.Sprintf("handoff not recorded: run ended as %s; use axi status to inspect it", final.Status))
-			}
-			emitDoc(cmd, toon.Field{Key: "handed_off", Value: true}, toon.Field{Key: "run", Value: final.ID}, toon.Field{Key: "run_status", Value: string(final.Status)})
-			return nil
+			return trackAxiSurface("axi-handoff", "/axi/handoff", nil, func() error {
+				env, err := openAxiDaemonEnv()
+				if err != nil {
+					return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
+				}
+				defer env.close()
+				branch, err := git.CurrentBranch(cmd.Context(), ".")
+				if err != nil {
+					return emitError(cmd, 1, fmt.Sprintf("get current branch: %v", err))
+				}
+				var active ipc.GetActiveRunResult
+				if err := env.client.Call(ipc.MethodGetActiveRun, activeRunLookupParams(env.repo.ID, branch), &active); err != nil {
+					return emitError(cmd, 1, fmt.Sprintf("get active run: %v", err))
+				}
+				if active.Run == nil {
+					return emitError(cmd, 1, "no active CI monitor on this branch; use axi status to inspect the run")
+				}
+				var result ipc.CancelRunResult
+				if err := env.client.Call(ipc.MethodHandoffRun, &ipc.CancelRunParams{RunID: active.Run.ID}, &result); err != nil {
+					return emitError(cmd, 1, fmt.Sprintf("handoff run: %v", err))
+				}
+				final, confirmed, reason := waitForTerminalRun(cmd.Context(), env.client, active.Run.ID, abortStateWaitTimeout)
+				if !confirmed {
+					return emitError(cmd, 1, "handoff requested but terminal state unconfirmed: "+reason, "Use axi status to inspect the run")
+				}
+				if final.Status != types.RunHandedOff {
+					return emitError(cmd, 1, fmt.Sprintf("handoff not recorded: run ended as %s; use axi status to inspect it", final.Status))
+				}
+				emitDoc(cmd, toon.Field{Key: "handed_off", Value: true}, toon.Field{Key: "run", Value: final.ID}, toon.Field{Key: "run_status", Value: string(final.Status)})
+				return nil
+			})
 		},
 	}
 }
