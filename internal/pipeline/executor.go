@@ -98,6 +98,10 @@ type Executor struct {
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
 	onPRMerged            func(context.Context, string)
+	// ciReadinessTransition wraps the readiness DB write and event emission at
+	// a daemon-owned synchronization boundary. It is nil in standalone
+	// executor embeddings.
+	ciReadinessTransition func(runID string, ready, declaredNoCI bool, persist func() error) error
 }
 
 // SetOnPRMerged registers a best-effort hook invoked after a merged PR state
@@ -107,6 +111,16 @@ func (e *Executor) SetOnPRMerged(fn func(context.Context, string)) {
 		return
 	}
 	e.onPRMerged = fn
+}
+
+// SetCIReadinessTransition serializes CI readiness persistence with daemon
+// lifecycle decisions. The transition owns the persist callback's critical
+// section; standalone executors use the direct DB path instead.
+func (e *Executor) SetCIReadinessTransition(fn func(runID string, ready, declaredNoCI bool, persist func() error) error) {
+	if e == nil {
+		return
+	}
+	e.ciReadinessTransition = fn
 }
 
 // SetForgeContext configures the immutable provider context used by every
@@ -1368,6 +1382,22 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		CIReadinessChanged: ciReadinessChanged,
 		MarkRunning:        markRunning,
 		OnPRMerged:         e.onPRMerged,
+	}
+	sctx.SetCIReadiness = func(ready, declaredNoCI bool) error {
+		declaredNoCI = ready && declaredNoCI
+		persist := func() error {
+			if err := e.db.SetRunCIReadyWithReason(run.ID, ready, declaredNoCI); err != nil {
+				return err
+			}
+			if sctx.CIReadinessChanged != nil {
+				sctx.CIReadinessChanged(ready, declaredNoCI)
+			}
+			return nil
+		}
+		if e.ciReadinessTransition != nil {
+			return e.ciReadinessTransition(run.ID, ready, declaredNoCI, persist)
+		}
+		return persist()
 	}
 	if stepName == types.StepReview {
 		BindUncertifiedPipelineRange(sctx)

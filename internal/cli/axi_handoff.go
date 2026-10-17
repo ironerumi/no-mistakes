@@ -47,8 +47,7 @@ func newAxiHandoffCmd() *cobra.Command {
 				if final.Status != types.RunHandedOff {
 					return emitError(cmd, 1, fmt.Sprintf("handoff not recorded: run ended as %s; use axi status to inspect it", final.Status))
 				}
-				emitDoc(cmd, toon.Field{Key: "handed_off", Value: true}, toon.Field{Key: "run", Value: final.ID}, toon.Field{Key: "run_status", Value: string(final.Status)})
-				return nil
+				return renderDriveResult(cmd, final, false, toon.Field{Key: "handed_off", Value: true})
 			})
 		},
 	}

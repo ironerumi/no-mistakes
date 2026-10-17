@@ -942,6 +942,9 @@ func clearCIMonitorReady(sctx *pipeline.StepContext) {
 
 func setCIMonitorReadiness(sctx *pipeline.StepContext, ready, declaredNoCI bool) error {
 	declaredNoCI = ready && declaredNoCI
+	if sctx.SetCIReadiness != nil {
+		return sctx.SetCIReadiness(ready, declaredNoCI)
+	}
 	if err := sctx.DB.SetRunCIReadyWithReason(sctx.Run.ID, ready, declaredNoCI); err != nil {
 		return err
 	}

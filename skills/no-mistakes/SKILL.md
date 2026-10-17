@@ -410,9 +410,10 @@ A `test-agent-unvalidated-work` finding means a timed-out Test agent left
 commits or changes no Test turn validated. Approval is rejected, so `--yes`
 stops at that gate without responding. Relay what the finding names and do
 not skip Test, which would publish that work. Ask the operator to choose:
-`--action fix` spends another agent budget to validate the work, and
-`no-mistakes axi handoff` ends the current branch's green CI monitor when its open PR is handed to human reviewers. It requires authoritative `checks-passed` readiness and records terminal `handed_off`, without merging or closing the PR. Before green, resolve the checks or gates with `axi run` instead.
+`--action fix` spends another agent budget to validate the work, or
 `no-mistakes axi abort` stops and cancels a discarded run; its behavior is unchanged.
+
+At a green open-PR CI monitor, `no-mistakes axi handoff` ends monitoring when the PR is handed to human reviewers. It requires authoritative `checks-passed` readiness and records terminal `handed_off`, without merging or closing the PR. Before green, resolve the checks or gates with `axi run` instead.
 
 ## Inspecting state
 
