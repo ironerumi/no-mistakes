@@ -417,7 +417,7 @@ func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error
 		}
 		current = testAnalyzerCorrectionPrompt(valErr, rejected)
 	}
-	return Findings{}, pipeline.AgentInvocationFailed(fmt.Errorf("validate test analyzer findings after %d attempts: %w", testAnalyzerMaxAttempts, lastErr))
+	return Findings{}, agent.RejectStructuredOutput(fmt.Errorf("validate test analyzer findings after %d attempts: %w", testAnalyzerMaxAttempts, lastErr))
 }
 
 func parseTestAnalyzerOutput(result *agent.Result) (Findings, error) {

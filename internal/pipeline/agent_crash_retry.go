@@ -17,31 +17,20 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// AgentInvocationFailed marks a failure of the agent call or its final output,
-// not a verdict, command failure, Git failure, or other step error. It leaves
-// the diagnostic and error chain intact, including when retries are disabled.
-func AgentInvocationFailed(err error) error {
-	if err == nil {
-		return nil
-	}
-	return &agentCallFailure{err}
-}
-
-type agentCallFailure struct{ error }
-
-func (e *agentCallFailure) Unwrap() error { return e.error }
-
 func retryableAgentCrash(ctx context.Context, err error, configuredTimeouts bool) bool {
-	var failure *agentCallFailure
-	if ctx.Err() != nil || !errors.As(err, &failure) {
+	if ctx.Err() != nil {
 		return false
 	}
+	// Reuse the manual continuation's invocation cause, rather than marking
+	// agent calls again. Default-budget cuts and rejected final output are
+	// additional automatic-retry cases, not new manual-continuation causes.
 	var budgetCut *agentInvocationError
 	if errors.As(err, &budgetCut) {
 		if configuredTimeouts || budgetCut.bound == "" {
 			return false
 		}
-	} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		(!errors.Is(err, ErrAgentInvocationFailed) && !agent.IsStructuredOutputRejected(err)) {
 		return false
 	}
 	// Adapters do not yet share a typed permanent-provider-error contract.
