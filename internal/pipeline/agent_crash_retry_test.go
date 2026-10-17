@@ -126,6 +126,69 @@ func TestExecutor_AgentCrashRetry(t *testing.T) {
 	}
 }
 
+// Exercise Claude's real subprocess and transient-retry loop, not a synthetic
+// error with the same diagnostic. The fake executable is not race-instrumented.
+func TestExecutor_AgentCrashRetryDoesNotRetryExhaustedClaude(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "claude.go")
+	bin := filepath.Join(dir, "claude.exe")
+	attempts := filepath.Join(dir, "attempts")
+	const fakeClaude = `package main
+import (
+ "fmt"
+ "os"
+)
+func main() {
+ f, err := os.OpenFile(os.Getenv("NM_TEST_CLAUDE_ATTEMPTS"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+ if err != nil { panic(err) }
+ if _, err := f.WriteString("attempt\n"); err != nil { panic(err) }
+ if err := f.Close(); err != nil { panic(err) }
+ fmt.Println("{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"api_error_status\":503,\"result\":\"service unavailable\"}")
+ os.Exit(1)
+}
+`
+	if err := os.WriteFile(source, []byte(fakeClaude), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("go", "build", "-o", bin, source).CombinedOutput(); err != nil {
+		t.Fatalf("build fake Claude: %v\n%s", err, output)
+	}
+	ag, err := agent.New(types.AgentClaude, bin, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, p, _, repo := setupTest(t)
+	work := t.TempDir()
+	initGitRepo(t, work)
+	head, err := git.HeadSHA(context.Background(), work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "exhausted-claude", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		calls++
+		_, err := sctx.RunAgent(agent.RunOpts{CWD: work, Prompt: "test", Env: []string{"NM_TEST_CLAUDE_ATTEMPTS=" + attempts}})
+		return &StepOutcome{}, err
+	}}
+	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, ag, []Step{step}, nil)
+	execErr := executor.Execute(context.Background(), run, repo, work)
+	const diagnostic = "step test failed: claude exited: exit status 1: API error status 503: service unavailable"
+	if execErr == nil || execErr.Error() != diagnostic || errString(executor, run.ID) != diagnostic {
+		t.Fatalf("original diagnostic lost: error=%v persisted=%s", execErr, errString(executor, run.ID))
+	}
+	data, err := os.ReadFile(attempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || string(data) != strings.Repeat("attempt\n", 4) {
+		t.Fatalf("adapter exhaustion spent crash retries: step calls=%d subprocess attempts=%q", calls, data)
+	}
+}
+
 func boolInt(value bool) int {
 	if value {
 		return 1

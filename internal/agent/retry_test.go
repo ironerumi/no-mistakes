@@ -486,6 +486,9 @@ func TestRunWithRetry_ExhaustsRetries(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error after exhausting retries")
 	}
+	if !IsTerminalProviderError(err) || !errors.Is(err, transientErr) || err.Error() != transientErr.Error() {
+		t.Fatalf("exhaustion must be terminal without losing the original error: %v", err)
+	}
 	if calls != 4 { // 1 initial + 3 retries
 		t.Errorf("expected 4 calls (1 + 3 retries), got %d", calls)
 	}
