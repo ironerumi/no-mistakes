@@ -264,8 +264,9 @@ Run the pipeline and decide on its findings as they come up:
      wait for the merge: tell the user the PR is ready and ask them to review
      and merge it (the PR link is in the ` + "`help`" + ` line). A generic empty forge
      check list without that declaration is not ready. no-mistakes keeps
-     monitoring the PR in the background until it is merged, closed, or its
-     configured idle timeout elapses, so a human can watch it in the TUI.
+     monitoring the PR in the background while the monitor is active; use
+     ` + "`no-mistakes axi handoff`" + ` to end green monitoring after handing
+     the open PR to human reviewers, or let the configured idle timeout elapse.
    - ` + "`passed`" + ` - the pipeline completed under the requested steps, including any
      explicit per-run skips. This alone is not evidence that a PR was merged.
    - ` + "`passed-with-override`" + ` - the pipeline completed with an explicitly approved Test exception or CI failure.
@@ -341,9 +342,10 @@ waits for a human to bring it up to date; only when the repository opts
 into ` + "`ci.rebase_behind`" + ` does the monitor give it the same rebase, once its
 checks are green and the base has held still for one poll. A PR that is merely behind a base without that rule needs nothing, since
 the platform merges it. The one exception is when that monitor is
-no longer running - the PR was closed, the run was aborted or superseded, it
-idle-timed-out, or its auto-fix attempts were exhausted - in which case recover
-with ` + "`no-mistakes rerun`" + `, subject to the clean-head check above. An accepted
+no longer running - the PR was closed, the run was aborted, superseded, or
+explicitly handed off, it idle-timed-out, or its auto-fix attempts were
+exhausted - in which case recover with ` + "`no-mistakes rerun`" + `, subject to the
+clean-head check above. An accepted
 rerun cancels the stale monitor and re-runs the full pipeline including a
 deterministic rebase step. Do **not** reach for
 ` + "`no-mistakes axi run`" + ` to refresh a still-active PR: after ` + "`checks-passed`" + ` it
