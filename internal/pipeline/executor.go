@@ -73,8 +73,7 @@ type Executor struct {
 	shared   *RunShared
 	workDir  string
 
-	// Ephemeral proof only: recovered runs retain a base fence but earn no
-	// retry credit.
+	// Ephemeral proof only: recovered runs earn no retry credit.
 	crashRetryBaseSHA   string
 	crashRetryRecovered bool
 
@@ -663,7 +662,6 @@ type recoveredGate struct {
 	autoFixes              int
 	lastRoundID            string
 	reviewedHeadSHA        string
-	effectiveBaseSHA       string
 	selectedOutstandingIDs []string
 }
 
@@ -700,15 +698,6 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	e.initializeRunScopes(run.ID)
 	e.crashRetryRecovered = true
-	if crashRetryStep(gate.step.Name()) {
-		e.crashRetryBaseSHA = gate.effectiveBaseSHA
-		if e.crashRetryBaseSHA == "" {
-			e.crashRetryBaseSHA = run.BaseSHA
-		}
-		if e.crashRetryBaseSHA == "" {
-			e.crashRetryBaseSHA = "unavailable"
-		}
-	}
 
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	duration := recoveredStepDuration(gate.stepResult)
@@ -1013,9 +1002,6 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				autoFixes:              autoFixes,
 				lastRoundID:            latest.ID,
 				selectedOutstandingIDs: retainFindingIDsByIdentity(*result.FindingsJSON, selectedOutstandingIDs, identity),
-			}
-			if parsed, parseErr := types.ParseFindingsJSON(*result.FindingsJSON); parseErr == nil && parsed.ReviewCoverageScope != nil {
-				gate.effectiveBaseSHA = parsed.ReviewCoverageScope.BaseSHA
 			}
 			if latest.ReviewedHeadSHA != nil {
 				gate.reviewedHeadSHA = *latest.ReviewedHeadSHA

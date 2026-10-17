@@ -246,19 +246,8 @@ func TestExecutor_ReviewContinuationAfterDefaultBranchAdvanceFailsClosed(t *test
 	}
 }
 
-func TestExecutor_AgentCrashRetryDisabledAfterRecovery(t *testing.T) {
-	t.Parallel()
-	database, p, _, repo := setupTest(t)
-	work := t.TempDir()
-	initGitRepo(t, work)
-	head, err := git.HeadSHA(context.Background(), work)
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, err := database.InsertRun(repo.ID, "recovered-crash", head, head)
-	if err != nil {
-		t.Fatal(err)
-	}
+func seedRecoveredTestGate(t *testing.T, database *db.DB, run *db.Run) *db.Run {
+	t.Helper()
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}
@@ -269,39 +258,77 @@ func TestExecutor_AgentCrashRetryDisabledAfterRecovery(t *testing.T) {
 	if err := database.StartStep(review.ID); err != nil {
 		t.Fatal(err)
 	}
-	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"operator decision","action":"ask-user"}]}`
-	if _, err := database.InsertReviewStepRound(review.ID, 1, "initial", &findings, nil, head, 0); err != nil {
+	if err := database.CompleteStepWithStatus(review.ID, types.StepStatusCompleted, 0, 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.ParkStepForApproval(run.ID, review.ID, types.StepStatusAwaitingApproval, 0, 0, &findings); err != nil {
+	testStep, err := database.InsertStepResult(run.ID, types.StepTest)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.InsertStepResult(run.ID, types.StepTest); err != nil {
+	if err := database.StartStep(testStep.ID); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"test-1","severity":"warning","description":"operator decision","action":"ask-user"}]}`
+	if err := database.ParkStepForApproval(run.ID, testStep.ID, types.StepStatusAwaitingApproval, 0, 0, &findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertStepRound(testStep.ID, 1, "initial", &findings, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertStepResult(run.ID, types.StepDocument); err != nil {
 		t.Fatal(err)
 	}
 	run, err = database.GetRun(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return run
+}
+
+func TestExecutor_AgentCrashRetryDisabledAfterRecovery(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	work := t.TempDir()
+	initGitRepo(t, work)
+	run = seedRecoveredTestGate(t, database, run)
 	calls := 0
-	crash := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+	document := &adaptiveCallStep{name: types.StepDocument, fn: func(*StepContext) (*StepOutcome, error) {
 		calls++
-		if err := sctx.CheckAgentCrashRetryBase("changed"); err != nil {
-			return nil, err
-		}
 		return nil, AgentInvocationFailed(errors.New("agent crashed"))
 	}}
-	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, nil, []Step{newPassStep(types.StepReview), crash}, nil)
+	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, nil, []Step{newPassStep(types.StepReview), newPassStep(types.StepTest), document}, nil)
 	executor.onEvent = func(event ipc.Event) {
 		if event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
-			if err := executor.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+			if err := executor.Respond(types.StepTest, types.ActionApprove, nil); err != nil {
 				t.Error(err)
 			}
 		}
 	}
-	err = executor.Resume(context.Background(), run, repo, work)
-	if err == nil || calls != 1 || !strings.Contains(err.Error(), "effective validation base changed") {
-		t.Fatalf("recovered continuation crossed the base fence: calls=%d err=%v", calls, err)
+	err := executor.Resume(context.Background(), run, repo, work)
+	if err == nil || calls != 1 || !strings.Contains(err.Error(), "step document failed: agent crashed") {
+		t.Fatalf("recovered crash was not an ordinary single failure: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestExecutor_RecoveredContinuationDoesNotFalseFailBaseFence(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	work := t.TempDir()
+	initGitRepo(t, work)
+	run = seedRecoveredTestGate(t, database, run)
+	calls := 0
+	document := &adaptiveCallStep{name: types.StepDocument, fn: func(*StepContext) (*StepOutcome, error) {
+		calls++
+		return &StepOutcome{}, nil
+	}}
+	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, nil, []Step{newPassStep(types.StepReview), newPassStep(types.StepTest), document}, nil)
+	executor.onEvent = func(event ipc.Event) {
+		if event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
+			if err := executor.Respond(types.StepTest, types.ActionApprove, nil); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	if err := executor.Resume(context.Background(), run, repo, work); err != nil || calls != 1 {
+		t.Fatalf("recovered successful continuation failed: calls=%d err=%v", calls, err)
 	}
 }
 
