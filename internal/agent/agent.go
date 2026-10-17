@@ -106,7 +106,9 @@ func (e *structuredOutputRejection) Error() string                { return e.err
 func (e *structuredOutputRejection) Unwrap() error                { return e.err }
 func (*structuredOutputRejection) StructuredOutputRejected() bool { return true }
 
-func rejectStructuredOutput(err error) error {
+// RejectStructuredOutput marks absent, malformed, or schema-rejected final
+// output without changing its diagnostic or underlying error chain.
+func RejectStructuredOutput(err error) error {
 	if err == nil || IsStructuredOutputRejected(err) {
 		return err
 	}
@@ -374,7 +376,7 @@ func finalizeTextResult(agentName, text string, schema json.RawMessage, usage To
 	if text == "" {
 		err := fmt.Errorf("%s returned no text output", agentName)
 		if len(schema) > 0 {
-			return resultFromUsage(usage), rejectStructuredOutput(err)
+			return resultFromUsage(usage), RejectStructuredOutput(err)
 		}
 		return resultFromUsage(usage), err
 	}
@@ -384,7 +386,7 @@ func finalizeTextResult(agentName, text string, schema json.RawMessage, usage To
 
 	output, err := parseStructuredTextOutput(text, schema, strings.HasPrefix(agentName, "acp:"))
 	if err != nil {
-		return resultFromUsage(usage), rejectStructuredOutput(fmt.Errorf("%s output parse: %w (output snippet: %q)", agentName, err, outputSnippet(text)))
+		return resultFromUsage(usage), RejectStructuredOutput(fmt.Errorf("%s output parse: %w (output snippet: %q)", agentName, err, outputSnippet(text)))
 	}
 
 	res := textResult(text, usage)

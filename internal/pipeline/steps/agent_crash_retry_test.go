@@ -34,21 +34,40 @@ func TestTestStep_AgentCrashRetryExitThenSuccess(t *testing.T) {
 
 // Exercise the real parser and executor together, not only a marked mock error.
 func TestDocumentStep_AgentCrashRetryMalformedOutput(t *testing.T) {
-	t.Parallel()
-	dir, base, head := setupGitRepo(t)
-	calls := 0
-	ag := &mockAgent{name: "malformed-then-valid", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-		calls++
-		if calls == 1 {
-			return &agent.Result{Output: json.RawMessage(`{not json`)}, nil
-		}
-		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"documentation is current"}`)}, nil
-	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
-	sctx.Config.AgentCrashRetries = 1
-	executor := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&DocumentStep{}}, nil)
-	if err := executor.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err != nil || calls != 2 {
-		t.Fatalf("malformed output did not recover: calls=%d error=%v", calls, err)
+	for _, tc := range []struct {
+		name       string
+		retries    int
+		alwaysBad  bool
+		wantCalls  int
+		wantFailed bool
+	}{
+		{"then valid", 1, false, 2, false},
+		{"exhausted", 1, true, 2, true},
+		{"disabled", 0, false, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, base, head := setupGitRepo(t)
+			calls := 0
+			ag := &mockAgent{name: "malformed-output", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				calls++
+				if calls == 1 || tc.alwaysBad {
+					return &agent.Result{Output: json.RawMessage(`{not json`)}, nil
+				}
+				return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"documentation is current"}`)}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+			sctx.Config.AgentCrashRetries = tc.retries
+			executor := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&DocumentStep{}}, nil)
+			err := executor.Execute(context.Background(), sctx.Run, sctx.Repo, dir)
+			if (err != nil) != tc.wantFailed || calls != tc.wantCalls {
+				t.Fatalf("malformed output: calls=%d error=%v; want calls=%d failed=%v", calls, err, tc.wantCalls, tc.wantFailed)
+			}
+			steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+			if err != nil || steps[0].FailureCause != nil {
+				t.Fatalf("parser rejection became a manual continuation cause: steps=%+v error=%v", steps, err)
+			}
+		})
 	}
 }
 

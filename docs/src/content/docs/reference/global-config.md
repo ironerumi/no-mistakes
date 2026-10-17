@@ -621,7 +621,7 @@ Before retrying, the executor proves that the run and worktree head SHA, recorde
 
 A hang cut by the default invocation budget can qualify. A non-default agent timeout, or any still-working cap, disables timeout-based crash retries; the shipped timeout values count as unconfigured even when the generated config writes them explicitly. Exits and malformed output can still qualify. Test budget cuts that already park for an operator decision remain parked, not automatically retried.
 
-Fix rounds, review-answer/coverage continuations, conflict resolution, custom gates, Intent and Push/PR/CI delivery are not replayed or retried. This budget is separate from `auto_fix`, is not replenished by approval rounds, and is disabled for the remainder of a run resumed after daemon recovery; a later agent crash fails that step normally, and the next run performs full validation from step 1. It does not continue a terminal run. It is global-only: repository config and environment variables cannot enable it.
+Fix rounds, review-answer/coverage continuations, conflict resolution, custom gates, Intent and Push/PR/CI delivery are not replayed or retried. This budget is separate from `auto_fix`, is not replenished by approval rounds, and is disabled for the remainder of a run resumed after daemon recovery; a later agent crash fails that step normally. It does not continue a terminal run: [`axi retry`](/reference/cli/#axi-retry) is the separate manual continuation, using the shared `agent_invocation` cause and its own checkpoint proofs. Timeout cuts and parser rejections do not acquire that cause just because they qualify for automatic retry. It is global-only: repository config and environment variables cannot enable it.
 
 ### agent_timeout
 
