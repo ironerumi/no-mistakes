@@ -148,9 +148,8 @@ type StepContext struct {
 	// PR-step start. Steps read this snapshot instead of mutable run state.
 	ClosingIssueRefs []string
 
-	// Set only during eligible live executions. All validation steps share
-	// the actual diff-base pin; runs.base_sha is the previous push, not
-	// necessarily the base resolved by the step's fresh upstream fetch.
+	// All validation steps share the actual diff-base pin; runs.base_sha is
+	// the previous push, not necessarily the base resolved by a fresh fetch.
 	crashRetryBaseSHA *string
 }
 

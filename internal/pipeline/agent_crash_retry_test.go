@@ -230,6 +230,22 @@ func TestCrashRetryPhases(t *testing.T) {
 	}
 }
 
+func TestExecutor_ReviewContinuationAfterDefaultBranchAdvanceFailsClosed(t *testing.T) {
+	base := "default-before"
+	executor := &Executor{crashRetryBaseSHA: base}
+	calls := 0
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		calls++
+		return nil, sctx.CheckAgentCrashRetryBase("default-after")
+	}}
+	sctx := &StepContext{FinalizingAnswers: true}
+	budget := 1
+	_, err := executor.executeWithCrashRetry(step, sctx, &budget)
+	if err == nil || !strings.Contains(err.Error(), "effective validation base changed") || calls != 1 || budget != 1 {
+		t.Fatalf("review continuation crossed the advanced default branch: calls=%d budget=%d err=%v", calls, budget, err)
+	}
+}
+
 func TestExecutor_AgentCrashRetryDisabledAfterRecovery(t *testing.T) {
 	t.Parallel()
 	database, p, _, repo := setupTest(t)
@@ -267,7 +283,14 @@ func TestExecutor_AgentCrashRetryDisabledAfterRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	crash := newFailStep(types.StepTest, AgentInvocationFailed(errors.New("agent crashed")))
+	calls := 0
+	crash := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		calls++
+		if err := sctx.CheckAgentCrashRetryBase("changed"); err != nil {
+			return nil, err
+		}
+		return nil, AgentInvocationFailed(errors.New("agent crashed"))
+	}}
 	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, nil, []Step{newPassStep(types.StepReview), crash}, nil)
 	executor.onEvent = func(event ipc.Event) {
 		if event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
@@ -276,8 +299,9 @@ func TestExecutor_AgentCrashRetryDisabledAfterRecovery(t *testing.T) {
 			}
 		}
 	}
-	if err := executor.Resume(context.Background(), run, repo, work); err == nil || crash.callCount() != 1 {
-		t.Fatalf("recovered proof earned retry credit: calls=%d err=%v", crash.callCount(), err)
+	err = executor.Resume(context.Background(), run, repo, work)
+	if err == nil || calls != 1 || !strings.Contains(err.Error(), "effective validation base changed") {
+		t.Fatalf("recovered continuation crossed the base fence: calls=%d err=%v", calls, err)
 	}
 }
 
@@ -333,6 +357,56 @@ func TestRetryableAgentCrash(t *testing.T) {
 	cancel()
 	if retryableAgentCrash(ctx, AgentInvocationFailed(errors.New("crash")), false) {
 		t.Fatal("cancelled run retried")
+	}
+}
+
+func TestExecutor_AgentCrashRetryUsesGeneratedDefaultConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "global.yaml")
+	config.EnsureDefaultGlobalConfig(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = []byte(strings.Replace(string(data), "agent_crash_retries: 0", "agent_crash_retries: 1", 1))
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	global, err := config.LoadGlobal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Merge(global, &config.RepoConfig{})
+	cfg.AgentTimeout = 20 * time.Millisecond
+	if cfg.AgentCrashRetries != 1 || cfg.AgentTimeoutsConfigured {
+		t.Fatalf("generated defaults changed retry eligibility: retries=%d configured=%t", cfg.AgentCrashRetries, cfg.AgentTimeoutsConfigured)
+	}
+
+	database, p, _, repo := setupTest(t)
+	work := t.TempDir()
+	initGitRepo(t, work)
+	head, err := git.HeadSHA(context.Background(), work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "generated-default-hang", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	ag := &hangingAgent{name: "generated-default-hang", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		calls++
+		if calls == 1 {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return &agent.Result{}, nil
+	}}
+	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		_, err := sctx.RunAgent(agent.RunOpts{})
+		return &StepOutcome{}, err
+	}}
+	if err := NewExecutor(database, p, cfg, ag, []Step{step}, nil).Execute(context.Background(), run, repo, work); err != nil || calls != 2 {
+		t.Fatalf("generated default-budget hang = %v, calls=%d; want one retry and two calls", err, calls)
 	}
 }
 
