@@ -416,7 +416,8 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
-	executor.SetCIReadinessTransition(m.transitionCIReadiness)
+	executor.SetCIObservationTransition(m.transitionCIObservation)
+	executor.SetCIHandoffValidator(m.handoffClaimValid)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -1752,7 +1753,8 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// Create executor with event broadcast.
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
-	executor.SetCIReadinessTransition(m.transitionCIReadiness)
+	executor.SetCIObservationTransition(m.transitionCIObservation)
+	executor.SetCIHandoffValidator(m.handoffClaimValid)
 	executor.SetForgeContext(forgeCtx)
 	executor.SetSkippedSteps(skipSteps)
 	if retry != nil {
@@ -2269,16 +2271,23 @@ func (m *RunManager) HandleCancel(runID string) error {
 	return nil
 }
 
-// transitionCIReadiness serializes the monitor's readiness write with
-// lifecycle decisions. A handoff claim wins over later stale monitor updates;
-// a readiness withdrawal already holding this transition wins over handoff.
-func (m *RunManager) transitionCIReadiness(runID string, ready, declaredNoCI bool, persist func() error) error {
+func (m *RunManager) transitionCIObservation(runID string, withdrawal bool, persist func() error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.handoffClaims != nil && m.handoffClaims[runID] {
-		return nil
+		if withdrawal {
+			delete(m.handoffClaims, runID)
+			return persist()
+		}
+		return pipeline.ErrHandoff
 	}
 	return persist()
+}
+
+func (m *RunManager) handoffClaimValid(runID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.handoffClaims != nil && m.handoffClaims[runID]
 }
 
 // HandleHandoff ends only an actively monitoring, green, open-PR run. Readiness
@@ -2286,7 +2295,7 @@ func (m *RunManager) transitionCIReadiness(runID string, ready, declaredNoCI boo
 func (m *RunManager) HandleHandoff(runID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	cancel, ok := m.cancels[runID]
+	_, ok := m.cancels[runID]
 	if !ok {
 		return fmt.Errorf("no active CI monitor for run %s; use axi status to inspect the run", runID)
 	}
@@ -2310,7 +2319,6 @@ func (m *RunManager) HandleHandoff(runID string) error {
 				m.handoffClaims = make(map[string]bool)
 			}
 			m.handoffClaims[runID] = true
-			cancel(pipeline.ErrHandoff)
 			return nil
 		}
 	}

@@ -51,34 +51,32 @@ func TestHandleHandoffRefusesReadinessWithdrawnDuringTransition(t *testing.T) {
 	defer cancel(context.Canceled)
 	m.cancels[run.ID] = cancel
 
+	if err := m.HandleHandoff(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("handoff cancelled the monitor before its claim was observed")
+	}
 	withdrawStarted := make(chan struct{})
 	releaseWithdraw := make(chan struct{})
 	withdrawDone := make(chan error, 1)
 	go func() {
-		withdrawDone <- m.transitionCIReadiness(run.ID, false, false, func() error {
+		withdrawDone <- m.transitionCIObservation(run.ID, true, func() error {
 			close(withdrawStarted)
 			<-releaseWithdraw
 			return database.SetRunCIReady(run.ID, false)
 		})
 	}()
 	<-withdrawStarted
-
-	handoffDone := make(chan error, 1)
-	go func() { handoffDone <- m.HandleHandoff(run.ID) }()
-	select {
-	case err := <-handoffDone:
-		t.Fatalf("handoff crossed the readiness transition: %v", err)
-	default:
-	}
 	close(releaseWithdraw)
 	if err := <-withdrawDone; err != nil {
 		t.Fatal(err)
 	}
-	if err := <-handoffDone; err == nil || !strings.Contains(err.Error(), "checks-passed") {
-		t.Fatalf("handoff error = %v, want readiness refusal", err)
+	if m.handoffClaimValid(run.ID) {
+		t.Fatal("readiness withdrawal left the handoff claim active")
 	}
 	if ctx.Err() != nil {
-		t.Fatal("refused handoff stopped the monitor")
+		t.Fatal("withdrawn handoff stopped the monitor")
 	}
 	got, err := database.GetRun(run.ID)
 	if err != nil {
@@ -86,6 +84,65 @@ func TestHandleHandoffRefusesReadinessWithdrawnDuringTransition(t *testing.T) {
 	}
 	if got.CIReadyAt != nil {
 		t.Fatal("readiness withdrawal was not persisted")
+	}
+}
+
+func TestHandleHandoffRevokedByPRClose(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepo(t.TempDir(), "https://example.test/o/r", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(database.UpdateRunStatus(run.ID, types.RunRunning))
+	must(database.UpdateRunPRURL(run.ID, "https://example.test/o/r/pull/1"))
+	must(database.UpdateRunPRState(run.ID, "open"))
+	must(database.SetRunCIReady(run.ID, true))
+	step, err := database.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(database.UpdateStepStatus(step.ID, types.StepStatusRunning))
+
+	m := NewRunManager(database, p, nil)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(context.Canceled)
+	m.cancels[run.ID] = cancel
+	must(m.HandleHandoff(run.ID))
+	if err := m.transitionCIObservation(run.ID, true, func() error {
+		return database.UpdateRunPRState(run.ID, "closed")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if m.handoffClaimValid(run.ID) {
+		t.Fatal("PR closure left the handoff claim active")
+	}
+	if ctx.Err() != nil {
+		t.Fatal("PR closure stopped the monitor through handoff")
+	}
+	got, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunCompleted || got.PRState == nil || *got.PRState != "closed" {
+		t.Fatalf("run = status %s, PR state %v; want completed/closed", got.Status, got.PRState)
 	}
 }
 
@@ -154,16 +211,19 @@ func TestHandleHandoffRequiresGreenOpenPRMonitor(t *testing.T) {
 			err = m.HandleHandoff(run.ID)
 			if mode == "green" {
 				must(err)
-				if !errors.Is(context.Cause(ctx), pipeline.ErrHandoff) {
-					t.Fatalf("cause = %v", context.Cause(ctx))
+				if ctx.Err() != nil {
+					t.Fatal("handoff cancelled the monitor before its next observation")
 				}
 				persisted := false
-				must(m.transitionCIReadiness(run.ID, false, false, func() error {
+				err := m.transitionCIObservation(run.ID, false, func() error {
 					persisted = true
 					return nil
-				}))
+				})
+				if !errors.Is(err, pipeline.ErrHandoff) {
+					t.Fatalf("handoff observation error = %v", err)
+				}
 				if persisted {
-					t.Fatal("monitor readiness update crossed an atomic handoff claim")
+					t.Fatal("monitor observation crossed an atomic handoff claim")
 				}
 			} else {
 				if err == nil || !strings.Contains(err.Error(), "axi ") {

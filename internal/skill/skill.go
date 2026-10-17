@@ -350,7 +350,7 @@ deterministic rebase step. Do **not** reach for
 reattaches to the running monitor (HEAD unchanged) and returns its output
 without rebasing.
 
-On a successful outcome (` + "`checks-passed`" + ` or ` + "`passed`" + `), close the loop with the
+On a successful outcome (` + "`checks-passed`" + `, ` + "`passed`" + `, or ` + "`handed-off`" + `), close the loop with the
 user: summarize what happened during the pipeline in a concise, easily readable
 format - what was validated and what was found. If the output includes a
 ` + "`fixes`" + ` table, the pipeline fixed findings your original change missed:
