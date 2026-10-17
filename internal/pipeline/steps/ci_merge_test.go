@@ -89,6 +89,71 @@ func TestCIStep_ReadinessWriteFailureWarnsAndKeepsMonitoring(t *testing.T) {
 	}
 }
 
+func TestCIStep_ReadinessClearFailureDoesNotAbortIssueObservation(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx.Run.PRURL = &prURL
+	sctx.Env = fakeCIGH(t, "OPEN", `[{"name":"build","state":"FAILURE","bucket":"fail"}]`)
+	sctx.Config.CITimeout = time.Minute
+	writeErr := errors.New("readiness write failed")
+	sctx.SetCIReadiness = func(bool, bool) error { return writeErr }
+	var logs []string
+	sctx.Log = func(message string) { logs = append(logs, message) }
+
+	outcome, err := (&CIStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("monitor error = %v, want issue observation despite readiness failure", err)
+	}
+	if outcome == nil {
+		t.Fatal("monitor outcome = nil, want issue observation")
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "warning: could not clear CI readiness: "+writeErr.Error()) {
+		t.Fatalf("logs = %v, want readiness warning", logs)
+	}
+}
+
+func TestCIStep_ReadinessWriteFailureRetriesOnNextPoll(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx.Run.PRURL = &prURL
+	green := `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`
+	sctx.Env = fakeCIGHSequence(t, "OPEN", []string{green, green})
+	sctx.Config.CITimeout = time.Minute
+	writeErr := errors.New("readiness write failed")
+	var readinessWrites int
+	sctx.SetCIReadiness = func(ready, declaredNoCI bool) error {
+		readinessWrites++
+		if readinessWrites == 1 {
+			if !ready || declaredNoCI {
+				t.Fatalf("first readiness write = (%t, %t), want green readiness", ready, declaredNoCI)
+			}
+			return writeErr
+		}
+		if !ready || declaredNoCI {
+			t.Fatalf("recovered readiness write = (%t, %t), want green readiness", ready, declaredNoCI)
+		}
+		return nil
+	}
+	polls := 0
+	stop := errors.New("monitor reached next poll")
+	step := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error {
+		polls++
+		if polls == 1 {
+			return nil
+		}
+		return stop
+	}}
+
+	if _, err := step.Execute(sctx); !errors.Is(err, stop) {
+		t.Fatalf("monitor error = %v, want next poll", err)
+	}
+	if readinessWrites != 2 {
+		t.Fatalf("readiness writes = %d, want failed write plus retry", readinessWrites)
+	}
+}
+
 func TestCIStep_MergeConflictDetected_ReturnsNeedsApproval(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
