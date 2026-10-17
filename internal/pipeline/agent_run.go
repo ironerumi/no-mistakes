@@ -116,7 +116,7 @@ func invokeAgent(parent context.Context, timeout, working time.Duration, cause e
 	cancel()
 	activity.finish()
 	if runErr != nil {
-		return nil, runErr
+		return nil, AgentInvocationFailed(runErr)
 	}
 	return result, nil
 }
@@ -649,7 +649,7 @@ func (a *timeoutAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Resu
 		cause := context.Cause(ctx)
 		switch {
 		case cause == nil:
-			return result, err
+			return result, AgentInvocationFailed(err)
 		case err != nil:
 			// The adapter's own account beats restating the cause.
 			return nil, err

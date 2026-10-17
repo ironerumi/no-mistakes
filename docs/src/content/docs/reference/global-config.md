@@ -603,6 +603,26 @@ It does not cancel the step, change auto-fix behavior, or mark the run failed.
 AXI renders the quiet signal in the `active_steps` table as part of `last_activity`, for example `quiet 12m3s ago: codex started pid=4242`.
 For older active runs that do not yet have activity rows, AXI falls back to the step log file's modification time.
 
+### agent_crash_retries
+
+Opt-in automatic retries of an agent-crashed Review, Test, Document or Lint step in the **same live run**. Completed steps stay completed. Set `agent_crash_retries: 1` to allow one additional attempt; the default `0` preserves the existing failure behavior.
+
+|         |                  |
+| ------- | ---------------- |
+| Type    | integer          |
+| Range   | `0`–`3`          |
+| Default | `0` (disabled)   |
+
+Only agent invocation errors and rejected/unparseable final output qualify, never a real finding, test verdict, configured-command failure, Git error, cancellation, authentication/access-denial error or quota exhaustion. Existing adapter and analyzer formatting retries run first; Claude's native structured-output retry exhaustion stays terminal. Each additional attempt must still produce a valid result; a crash is never a pass.
+
+Eligible validation steps also pin their freshly resolved diff base across the live run: a later fetch that changes that base fails before invoking another agent, even if the run's recorded previous-push SHA did not change. A full restart at Review establishes a new base pin.
+
+Before retrying, the executor proves that the run and worktree head SHA, recorded base SHA, effective configuration, completed-step records/rounds and evidence-file hashes still match their pre-attempt snapshot. The worktree must be clean before and after the attempt, including untracked and ignored files. Missing or changed proof refuses the retry and fails normally: start a fresh run for full validation. Partial edits, commits or evidence from a crashed attempt are never silently discarded or certified. The log records the `agent_invocation` retry or proof refusal; exhausted retries retain the original failure diagnostic.
+
+A hang cut by the default invocation budget can qualify. Explicitly setting **any** agent timeout or still-working cap disables timeout-based crash retries (including explicitly setting the default duration); exits and malformed output can still qualify. Test budget cuts that already park for an operator decision remain parked, not automatically retried.
+
+Fix rounds, review-answer/coverage continuations, conflict resolution, custom gates, Intent and Push/PR/CI delivery are not replayed. This budget is separate from `auto_fix`, is not replenished by approval rounds, and is disabled for runs resumed after daemon recovery, where the earlier effective-base proof is unavailable. It does not continue a terminal run. It is global-only: repository config and environment variables cannot enable it.
+
 ### agent_timeout
 
 Stall budget for one pipeline agent invocation that does not already have a more specific deadline.

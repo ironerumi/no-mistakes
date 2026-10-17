@@ -147,6 +147,11 @@ type StepContext struct {
 	// ClosingIssueRefs are the explicit --closes values claimed from the DB at
 	// PR-step start. Steps read this snapshot instead of mutable run state.
 	ClosingIssueRefs []string
+
+	// Set only during eligible live executions. All validation steps share
+	// the actual diff-base pin; runs.base_sha is the previous push, not
+	// necessarily the base resolved by the step's fresh upstream fetch.
+	crashRetryBaseSHA *string
 }
 
 // RunAgentSession executes one turn of a durable review-loop role session,
