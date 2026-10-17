@@ -192,24 +192,39 @@ func TestExecutor_AgentCrashRetryDoesNotRetryVerdicts(t *testing.T) {
 	}
 }
 
-func TestCrashRetryExcludesMutatingPhases(t *testing.T) {
+func TestCrashRetryPhases(t *testing.T) {
 	for _, name := range []types.StepName{types.StepIntent, types.StepRebase, types.StepPush, types.StepPR, types.StepCI, "gate.test.check"} {
 		if crashRetryStep(name) {
 			t.Fatalf("unsafe phase %s can be replayed", name)
 		}
 	}
-	for _, phase := range []string{"fix", "answer", "coverage"} {
+	for _, phase := range []string{"fix", "answer", "fix-answer", "coverage"} {
 		t.Run(phase, func(t *testing.T) {
-			// No DB/git proof is needed or permitted on the excluded path.
-			sctx := &StepContext{Fixing: phase == "fix", FinalizingAnswers: phase == "answer"}
+			sctx := &StepContext{
+				Fixing:            phase == "fix" || phase == "fix-answer",
+				FinalizingAnswers: phase == "answer" || phase == "fix-answer",
+			}
 			if phase == "coverage" {
 				sctx.CoverageContinuation = &db.StepRound{}
 			}
-			step := newFailStep(types.StepReview, AgentInvocationFailed(errors.New("crash")))
+			calls := 0
+			step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+				calls++
+				if phase != "fix" {
+					if err := sctx.CheckAgentCrashRetryBase("advanced"); err != nil {
+						return nil, err
+					}
+				}
+				return nil, AgentInvocationFailed(errors.New("crash"))
+			}}
+			executor := &Executor{crashRetryBaseSHA: "original"}
 			budget := 3
-			_, err := (&Executor{}).executeWithCrashRetry(step, sctx, &budget)
-			if err == nil || step.callCount() != 1 || budget != 3 {
-				t.Fatalf("%s replayed: calls=%d budget=%d err=%v", phase, step.callCount(), budget, err)
+			_, err := executor.executeWithCrashRetry(step, sctx, &budget)
+			if err == nil || calls != 1 || budget != 3 {
+				t.Fatalf("%s replayed: calls=%d budget=%d err=%v", phase, calls, budget, err)
+			}
+			if phase != "fix" && !strings.Contains(err.Error(), "effective validation base changed") {
+				t.Fatalf("%s ignored the changed effective base: %v", phase, err)
 			}
 		})
 	}
