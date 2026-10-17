@@ -32,20 +32,13 @@ func retryableAgentCrash(ctx context.Context, err error, configuredTimeouts bool
 		(!errors.Is(err, ErrAgentInvocationFailed) && !agent.IsStructuredOutputRejected(err)) {
 		return false
 	}
-	if agent.IsUsageLimitReached(err) {
+	if agent.IsUsageLimitReached(err) || agent.IsTerminalProviderError(err) {
 		return false
 	}
 	if agent.IsStructuredOutputRejected(err) {
 		return true
 	}
-	if budgetCut != nil && budgetCut.adapter != nil {
-		return !agent.IsTerminalProviderError(budgetCut.adapter)
-	}
-	var invocationFailure *agentInvocationFailure
-	if errors.As(err, &invocationFailure) {
-		return !agent.IsTerminalProviderError(invocationFailure.err)
-	}
-	return !agent.IsTerminalProviderError(err)
+	return true
 }
 
 // CheckAgentCrashRetryBase binds the actual diff base at the shared resolver,

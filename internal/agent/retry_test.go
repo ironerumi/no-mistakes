@@ -86,6 +86,11 @@ func TestClassifyTransient_Positive(t *testing.T) {
 			wantSub: "protocol residue",
 		},
 		{
+			name:    "protocol residue with provider-like output text",
+			errMsg:  `pi output parse: invalid character '<' after top-level value (output snippet: "{\"balance\":\"token\"}")`,
+			wantSub: "protocol residue",
+		},
+		{
 			name:    "pi missing output tool",
 			errMsg:  `pi did not finish by calling no_mistakes_output alone`,
 			wantSub: "missing output tool",

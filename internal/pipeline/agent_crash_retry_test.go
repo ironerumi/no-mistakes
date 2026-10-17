@@ -365,6 +365,12 @@ func (usageLimitReachedError) Error() string { return "provider usage limit reac
 
 func (usageLimitReachedError) UsageLimitReached() bool { return true }
 
+type terminalProviderError struct{ message string }
+
+func (e terminalProviderError) Error() string { return e.message }
+
+func (terminalProviderError) TerminalProviderError() bool { return true }
+
 func TestRetryableAgentCrash(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -376,16 +382,16 @@ func TestRetryableAgentCrash(t *testing.T) {
 		{"unclassified error", errors.New("exit status 1"), false, false},
 		{"unparseable", agent.RejectStructuredOutput(errors.New("invalid JSON")), false, true},
 		{"structured output field names", &agentInvocationFailure{err: agent.RejectStructuredOutput(errors.New(`structured output: {"author":"token"}`))}, false, true},
-		{"auth", &agentInvocationFailure{err: errors.New("provider authentication failed")}, false, false},
-		{"login", &agentInvocationFailure{err: errors.New("login required")}, false, false},
-		{"api key", &agentInvocationFailure{err: errors.New("invalid API key")}, false, false},
-		{"credit", &agentInvocationFailure{err: errors.New("insufficient credit balance")}, false, false},
-		{"forbidden", &agentInvocationFailure{err: errors.New("403 forbidden")}, false, false},
-		{"quota", &agentInvocationFailure{err: errors.New("insufficient_quota")}, false, false},
-		{"claude schema exhaustion", &agentInvocationFailure{err: errors.New("error_max_structured_output_retries")}, false, false},
+		{"auth", &agentInvocationFailure{err: terminalProviderError{"provider authentication failed"}}, false, false},
+		{"login", &agentInvocationFailure{err: terminalProviderError{"login required"}}, false, false},
+		{"api key", &agentInvocationFailure{err: terminalProviderError{"invalid API key"}}, false, false},
+		{"credit", &agentInvocationFailure{err: terminalProviderError{"insufficient credit balance"}}, false, false},
+		{"forbidden", &agentInvocationFailure{err: terminalProviderError{"403 forbidden"}}, false, false},
+		{"quota", &agentInvocationFailure{err: terminalProviderError{"insufficient_quota"}}, false, false},
+		{"claude schema exhaustion", &agentInvocationFailure{err: terminalProviderError{"error_max_structured_output_retries"}}, false, false},
 		{"default hang", &agentInvocationError{bound: "silent budget", cause: ErrAgentTimeout, adapter: context.Canceled}, false, true},
-		{"quota beyond bounded report", &agentInvocationError{message: "timed out; bounded adapter report", bound: "silent budget", cause: ErrAgentTimeout, adapter: errors.New(strings.Repeat("x", 500) + " insufficient_quota")}, false, false},
-		{"Claude session limit", &agentInvocationFailure{err: errors.New("claude exited: API error status 429: You've hit your session limit · resets later")}, false, false},
+		{"quota beyond bounded report", &agentInvocationError{message: "timed out; bounded adapter report", bound: "silent budget", cause: ErrAgentTimeout, adapter: terminalProviderError{strings.Repeat("x", 500) + " insufficient_quota"}}, false, false},
+		{"Claude session limit", &agentInvocationFailure{err: terminalProviderError{"claude exited: API error status 429: You've hit your session limit · resets later"}}, false, false},
 		{"adapter usage limit signal", &agentInvocationFailure{err: usageLimitReachedError{}}, false, false},
 		{"configured timeout", &agentInvocationError{bound: "silent budget", cause: ErrAgentTimeout}, true, false},
 	} {
