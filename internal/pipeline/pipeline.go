@@ -17,6 +17,10 @@ var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 // active run.
 var ErrDaemonShutdown = errors.New("daemon shutting down")
 
+// ErrHandoff stops an already-green CI monitor without cancelling the work.
+// Only the daemon's validated explicit handoff request supplies this cause.
+var ErrHandoff = errors.New("green PR handed off for human review")
+
 // ErrParkedAtShutdown is returned when a daemon shutdown reached a run that was
 // fully recorded as waiting at an approval gate. The run keeps that record so
 // the next start resumes it, as it would after a crash.

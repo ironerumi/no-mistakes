@@ -1431,6 +1431,13 @@ rounds:
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
 			durationMS := executionMS + roundDuration
+			if stepName == types.StepCI && errors.Is(context.Cause(ctx), ErrHandoff) {
+				if dbErr := e.db.CompleteStep(sr.ID, 0, durationMS, logPath); dbErr != nil {
+					return false, "", dbErr
+				}
+				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusCompleted), "", "", &durationMS)
+				return false, "", ErrHandoff
+			}
 			// Persist the failure reason to the step's own log file. The error
 			// often carries the only detail of why the step failed (e.g. git
 			// stderr from a rejected push); without this the step log shows the
@@ -2321,6 +2328,9 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if errors.Is(err, ErrParkedAtShutdown) {
 		return err
 	}
+	if errors.Is(err, ErrHandoff) {
+		return e.completeRunWithStatus(run, repo, types.RunHandedOff)
+	}
 	errMsg := err.Error()
 	for _, ctx := range ctxs {
 		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
@@ -2351,12 +2361,16 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 }
 
 func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
+	return e.completeRunWithStatus(run, repo, types.RunCompleted)
+}
+
+func (e *Executor) completeRunWithStatus(run *db.Run, repo *db.Repo, status types.RunStatus) error {
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
 	var err error
 	if verified {
-		err = e.db.UpdateRunStatusWithVerifiedHead(run.ID, types.RunCompleted, verifiedHead)
+		err = e.db.UpdateRunStatusWithVerifiedHead(run.ID, status, verifiedHead)
 	} else {
-		err = e.db.UpdateRunStatus(run.ID, types.RunCompleted)
+		err = e.db.UpdateRunStatus(run.ID, status)
 	}
 	if err != nil {
 		return err
@@ -2364,7 +2378,7 @@ func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
 	if verified {
 		run.HeadSHA = verifiedHead
 	}
-	run.Status = types.RunCompleted
+	run.Status = status
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	return nil
 }
@@ -2451,7 +2465,7 @@ func (e *Executor) emitRunEvent(eventType ipc.EventType, run *db.Run, repo *db.R
 	// rows so both ActionApprove sites (live wait and Resume) are covered.
 	// Gated on the terminal status, not the event type: errorRun emits the same
 	// event for failed/cancelled runs, whose banner never reads it.
-	if run.Status == types.RunCompleted {
+	if run.Status == types.RunCompleted || run.Status == types.RunHandedOff {
 		if steps, err := e.db.GetStepsByRun(run.ID); err == nil {
 			ciReason, testReason := completionOverrideReasons(steps)
 			if ciReason != "" {
