@@ -21,7 +21,7 @@ func retryableAgentCrash(ctx context.Context, err error, configuredTimeouts bool
 	if ctx.Err() != nil {
 		return false
 	}
-	if agent.IsUsageLimitReached(err) {
+	if agent.IsUsageLimitReached(err) || agent.IsTerminalProviderError(err) {
 		return false
 	}
 	var budgetCut *agentInvocationError
