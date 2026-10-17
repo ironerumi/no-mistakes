@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,8 +12,52 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
+
+func TestCIStep_HandoffWakeRechecksGreenReadiness(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx.Run.PRURL = &prURL
+	sctx.Env = fakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`)
+	sctx.Config.CITimeout = time.Minute
+	wake := make(chan struct{}, 1)
+	sctx.CIWake = wake
+	firstReady := make(chan struct{})
+	readyCalls := 0
+	sctx.SetCIReadiness = func(ready, _ bool) error {
+		if !ready {
+			return nil
+		}
+		readyCalls++
+		if readyCalls == 1 {
+			close(firstReady)
+			return nil
+		}
+		return pipeline.ErrHandoff
+	}
+
+	done := make(chan struct {
+		err error
+	}, 1)
+	go func() {
+		_, err := (&CIStep{pollIntervalOverride: 30 * time.Second}).Execute(sctx)
+		done <- struct{ err error }{err: err}
+	}()
+	<-firstReady
+	wake <- struct{}{}
+
+	select {
+	case result := <-done:
+		if !errors.Is(result.err, pipeline.ErrHandoff) {
+			t.Fatalf("handoff result error = %v, want ErrHandoff", result.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handoff wake did not interrupt the CI poll wait")
+	}
+}
 
 func TestCIStep_MergeConflictDetected_ReturnsNeedsApproval(t *testing.T) {
 	t.Parallel()
