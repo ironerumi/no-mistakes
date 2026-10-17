@@ -80,6 +80,45 @@ func TestMergeFindingsJSON_UserAdditionStaysSelected(t *testing.T) {
 	}
 }
 
+func TestRemapFindingIDsJSON_ReservesExactIDsBeforeContentMatches(t *testing.T) {
+	gate := types.Findings{Items: []types.Finding{
+		{ID: "review-1", Severity: "warning", File: "file.go", Line: 10, Description: "same content", Action: types.ActionNoOp},
+		{ID: "review-2", Severity: "warning", File: "file.go", Line: 10, Description: "same content", Action: types.ActionAutoFix},
+	}}
+	added := types.Finding{
+		ID:               "user-1",
+		Severity:         "warning",
+		File:             "file.go",
+		Line:             10,
+		Description:      "same content",
+		Action:           types.ActionAutoFix,
+		Source:           types.FindingSourceUser,
+		UserInstructions: "keep the user-authored repair",
+	}
+	gateRaw, err := types.MarshalFindingsJSON(gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, persistedRaw := normalizeFixSelection(gateRaw, approvalResponse{
+		findingIDs:    []string{"review-2"},
+		addedFindings: []types.Finding{added},
+	}, true)
+	persisted, err := types.ParseFindingsJSON(persistedRaw)
+	if err != nil {
+		t.Fatalf("parse persisted selection: %v", err)
+	}
+	byID := make(map[string]types.Finding, len(persisted.Items))
+	for _, item := range persisted.Items {
+		byID[item.ID] = item
+	}
+	if got := byID["review-2"]; got.Action != types.ActionAutoFix || got.Source == types.FindingSourceUser {
+		t.Fatalf("blocking finding recovered under the wrong identity: %#v", got)
+	}
+	if got := byID["user-1"]; got != added {
+		t.Fatalf("user finding recovered under the wrong identity: %#v, want %#v", got, added)
+	}
+}
+
 func TestRetainMatchingFindingsJSON_DropsFindingsMissingFromLatestReview(t *testing.T) {
 	existingRaw := `{"findings":[{"id":"review-1","severity":"warning","description":"first"},{"id":"review-2","severity":"error","description":"second"}],"summary":"2 findings"}`
 	keepRaw := `{"findings":[{"id":"review-7","severity":"error","description":"second"},{"id":"review-8","severity":"warning","description":"third"}],"summary":"2 findings"}`

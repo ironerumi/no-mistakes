@@ -489,32 +489,34 @@ func remapFindingIDsJSON(mergedRaw, selectedRaw string) string {
 	mergedCounts := countFindingFingerprints(merged.Items)
 	selectedCounts := countFindingFingerprints(selected.Items)
 	used := make(map[int]bool, len(selected.Items))
+	matched := make([]bool, len(selected.Items))
+	// Reserve every selected item's exact identity before content matching.
+	// Otherwise an earlier blocking item can consume the ID of a later user
+	// addition that has the same content, swapping their identities on recovery.
 	for i := range selected.Items {
-		matched := false
-		// A preserved user addition already has its selected identity. Prefer
-		// it over a content-equivalent record kept alongside it.
-		if selected.Items[i].Source == types.FindingSourceUser {
-			for j := range merged.Items {
-				if !used[j] && merged.Items[j].Source == types.FindingSourceUser && selected.Items[i].ID == merged.Items[j].ID && SameFinding(selected.Items[i], merged.Items[j]) {
-					used[j] = true
-					matched = true
-					break
-				}
+		for j := range merged.Items {
+			if !used[j] && selected.Items[i].ID != "" && selected.Items[i].ID == merged.Items[j].ID && SameFinding(selected.Items[i], merged.Items[j]) {
+				used[j] = true
+				matched[i] = true
+				break
 			}
 		}
-		if matched {
+	}
+	for i := range selected.Items {
+		if matched[i] {
 			continue
 		}
+		contentMatched := false
 		for j := range merged.Items {
 			if used[j] || findingKey(selected.Items[i]) != findingKey(merged.Items[j]) {
 				continue
 			}
 			selected.Items[i].ID = merged.Items[j].ID
 			used[j] = true
-			matched = true
+			contentMatched = true
 			break
 		}
-		if matched {
+		if contentMatched {
 			continue
 		}
 		fingerprint := findingFingerprint(selected.Items[i])
