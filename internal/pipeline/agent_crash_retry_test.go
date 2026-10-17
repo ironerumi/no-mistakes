@@ -18,6 +18,33 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestExecutor_AgentCrashRetryDoesNotRetryGitExit(t *testing.T) {
+	database, p, _, repo := setupTest(t)
+	work := t.TempDir()
+	initGitRepo(t, work)
+	head, err := git.HeadSHA(context.Background(), work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "git-failure", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	ag := &hangingAgent{name: "unused", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		calls++
+		return &agent.Result{}, nil
+	}}
+	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		_, err := git.Run(sctx.Ctx, sctx.WorkDir, "fetch", "missing-remote", "main")
+		return &StepOutcome{}, err
+	}}
+	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, ag, []Step{step}, nil)
+	if err := executor.Execute(context.Background(), run, repo, work); err == nil || calls != 0 {
+		t.Fatalf("git failure retried as an agent crash: calls=%d error=%v", calls, err)
+	}
+}
+
 func TestExecutor_AgentCrashRetry(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -380,6 +407,7 @@ func TestRetryableAgentCrash(t *testing.T) {
 		want       bool
 	}{
 		{"process exit", &agentInvocationFailure{err: processExitError{"agent exited: exit status 1"}}, false, true},
+		{"unowned process exit", &exec.ExitError{}, false, false},
 		{"unclassified error", &agentInvocationFailure{err: errors.New("exit status 1")}, false, false},
 		{"unparseable", agent.RejectStructuredOutput(errors.New("invalid JSON")), false, false},
 		{"structured output field names", &agentInvocationFailure{err: agent.RejectStructuredOutput(errors.New(`structured output: {"author":"token"}`))}, false, false},
