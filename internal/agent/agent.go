@@ -100,13 +100,6 @@ func IsUsageLimitReached(err error) bool {
 	return errors.As(err, &limit) && limit.UsageLimitReached()
 }
 
-func IsTerminalProviderError(err error) bool {
-	var terminal interface {
-		TerminalProviderError() bool
-	}
-	return errors.As(err, &terminal) && terminal.TerminalProviderError()
-}
-
 type structuredOutputRejection struct{ err error }
 
 func (e *structuredOutputRejection) Error() string                { return e.err.Error() }

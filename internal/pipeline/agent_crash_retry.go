@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -20,25 +21,18 @@ func retryableAgentCrash(ctx context.Context, err error, configuredTimeouts bool
 	if ctx.Err() != nil {
 		return false
 	}
-	// Reuse the manual continuation's invocation cause, rather than marking
-	// agent calls again. Default-budget cuts and rejected final output are
-	// additional automatic-retry cases, not new manual-continuation causes.
+	if agent.IsUsageLimitReached(err) {
+		return false
+	}
 	var budgetCut *agentInvocationError
 	if errors.As(err, &budgetCut) {
-		if configuredTimeouts || budgetCut.bound == "" {
-			return false
-		}
-	} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-		(!errors.Is(err, ErrAgentInvocationFailed) && !agent.IsStructuredOutputRejected(err)) {
+		return !configuredTimeouts && budgetCut.bound != ""
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	if agent.IsUsageLimitReached(err) || agent.IsTerminalProviderError(err) {
-		return false
-	}
-	if agent.IsStructuredOutputRejected(err) {
-		return true
-	}
-	return true
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr)
 }
 
 // CheckAgentCrashRetryBase binds the actual diff base at the shared resolver,
