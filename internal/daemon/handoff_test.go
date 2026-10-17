@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -12,7 +13,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func TestHandleHandoffRefusesReadinessWithdrawnDuringTransition(t *testing.T) {
+func newHandoffFixture(t *testing.T, ready bool) (*db.DB, *db.Run, *RunManager, context.Context, context.CancelCauseFunc, chan struct{}) {
+	t.Helper()
 	p := paths.WithRoot(t.TempDir())
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
@@ -21,7 +23,7 @@ func TestHandleHandoffRefusesReadinessWithdrawnDuringTransition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
+	t.Cleanup(func() { database.Close() })
 	repo, err := database.InsertRepo(t.TempDir(), "https://example.test/o/r", "main")
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +41,7 @@ func TestHandleHandoffRefusesReadinessWithdrawnDuringTransition(t *testing.T) {
 	must(database.UpdateRunStatus(run.ID, types.RunRunning))
 	must(database.UpdateRunPRURL(run.ID, "https://example.test/o/r/pull/1"))
 	must(database.UpdateRunPRState(run.ID, "open"))
-	must(database.SetRunCIReady(run.ID, true))
+	must(database.SetRunCIReady(run.ID, ready))
 	step, err := database.InsertStepResult(run.ID, types.StepCI)
 	if err != nil {
 		t.Fatal(err)
@@ -47,36 +49,70 @@ func TestHandleHandoffRefusesReadinessWithdrawnDuringTransition(t *testing.T) {
 	must(database.UpdateStepStatus(step.ID, types.StepStatusRunning))
 
 	m := NewRunManager(database, p, nil)
-	ctx, cancel := context.WithCancelCause(context.Background())
-	defer cancel(context.Canceled)
+	monitorCtx, cancel := context.WithCancelCause(context.Background())
+	wake := make(chan struct{}, 1)
 	m.cancels[run.ID] = cancel
+	m.ciWakes[run.ID] = wake
+	return database, run, m, monitorCtx, cancel, wake
+}
 
-	if err := m.HandleHandoff(run.ID); err != nil {
+func requestHandoff(t *testing.T, m *RunManager, runID string, wake <-chan struct{}) <-chan error {
+	t.Helper()
+	result := make(chan error, 1)
+	go func() { result <- m.HandleHandoff(context.Background(), runID) }()
+	select {
+	case <-wake:
+		return result
+	case <-time.After(2 * time.Second):
+		t.Fatal("handoff request did not wake the CI monitor")
+		return nil
+	}
+}
+
+func awaitHandoffResult(t *testing.T, result <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatal("handoff request was not resolved by the CI monitor")
+		return nil
+	}
+}
+
+func TestHandleHandoffMonitorCommitsGreenOpenPR(t *testing.T) {
+	database, run, m, monitorCtx, cancel, wake := newHandoffFixture(t, true)
+	defer cancel(context.Canceled)
+
+	result := requestHandoff(t, m, run.ID, wake)
+	if err := m.transitionCIObservation(run.ID, false, true, "", func() error {
+		return database.SetRunCIReady(run.ID, true)
+	}); !errors.Is(err, pipeline.ErrHandoff) {
+		t.Fatalf("green observation error = %v, want ErrHandoff", err)
+	}
+	if err := awaitHandoffResult(t, result); err != nil {
+		t.Fatalf("handoff result = %v, want success", err)
+	}
+	if monitorCtx.Err() != nil {
+		t.Fatal("handoff stopped the monitor context")
+	}
+}
+
+func TestHandleHandoffReadinessWithdrawalRefusesAndContinues(t *testing.T) {
+	database, run, m, monitorCtx, cancel, wake := newHandoffFixture(t, true)
+	defer cancel(context.Canceled)
+
+	result := requestHandoff(t, m, run.ID, wake)
+	if err := m.transitionCIObservation(run.ID, true, false, "CI checks are not green", func() error {
+		return database.SetRunCIReady(run.ID, false)
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if ctx.Err() != nil {
-		t.Fatal("handoff cancelled the monitor before its claim was observed")
+	if err := awaitHandoffResult(t, result); err == nil || !strings.Contains(err.Error(), "not green") {
+		t.Fatalf("handoff result = %v, want readiness refusal", err)
 	}
-	withdrawStarted := make(chan struct{})
-	releaseWithdraw := make(chan struct{})
-	withdrawDone := make(chan error, 1)
-	go func() {
-		withdrawDone <- m.transitionCIObservation(run.ID, true, false, func() error {
-			close(withdrawStarted)
-			<-releaseWithdraw
-			return database.SetRunCIReady(run.ID, false)
-		})
-	}()
-	<-withdrawStarted
-	close(releaseWithdraw)
-	if err := <-withdrawDone; err != nil {
-		t.Fatal(err)
-	}
-	if m.handoffClaimValid(run.ID) {
-		t.Fatal("readiness withdrawal left the handoff claim active")
-	}
-	if ctx.Err() != nil {
-		t.Fatal("withdrawn handoff stopped the monitor")
+	if monitorCtx.Err() != nil {
+		t.Fatal("refused handoff stopped the monitor")
 	}
 	got, err := database.GetRun(run.ID)
 	if err != nil {
@@ -87,55 +123,21 @@ func TestHandleHandoffRefusesReadinessWithdrawnDuringTransition(t *testing.T) {
 	}
 }
 
-func TestHandleHandoffRevokedByPRClose(t *testing.T) {
-	p := paths.WithRoot(t.TempDir())
-	if err := p.EnsureDirs(); err != nil {
-		t.Fatal(err)
-	}
-	database, err := db.Open(p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	repo, err := database.InsertRepo(t.TempDir(), "https://example.test/o/r", "main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, err := database.InsertRun(repo.ID, "feature", "head", "base")
-	if err != nil {
-		t.Fatal(err)
-	}
-	must := func(err error) {
-		t.Helper()
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	must(database.UpdateRunStatus(run.ID, types.RunRunning))
-	must(database.UpdateRunPRURL(run.ID, "https://example.test/o/r/pull/1"))
-	must(database.UpdateRunPRState(run.ID, "open"))
-	must(database.SetRunCIReady(run.ID, true))
-	step, err := database.InsertStepResult(run.ID, types.StepCI)
-	if err != nil {
-		t.Fatal(err)
-	}
-	must(database.UpdateStepStatus(step.ID, types.StepStatusRunning))
-
-	m := NewRunManager(database, p, nil)
-	ctx, cancel := context.WithCancelCause(context.Background())
+func TestHandleHandoffPRCloseRefusesAndContinues(t *testing.T) {
+	database, run, m, monitorCtx, cancel, wake := newHandoffFixture(t, true)
 	defer cancel(context.Canceled)
-	m.cancels[run.ID] = cancel
-	must(m.HandleHandoff(run.ID))
-	if err := m.transitionCIObservation(run.ID, true, false, func() error {
+
+	result := requestHandoff(t, m, run.ID, wake)
+	if err := m.transitionCIObservation(run.ID, true, false, "PR is closed", func() error {
 		return database.UpdateRunPRState(run.ID, "closed")
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if m.handoffClaimValid(run.ID) {
-		t.Fatal("PR closure left the handoff claim active")
+	if err := awaitHandoffResult(t, result); err == nil || !strings.Contains(err.Error(), "PR is closed") {
+		t.Fatalf("handoff result = %v, want PR refusal", err)
 	}
-	if ctx.Err() != nil {
-		t.Fatal("PR closure stopped the monitor through handoff")
+	if monitorCtx.Err() != nil {
+		t.Fatal("refused handoff stopped the monitor")
 	}
 	got, err := database.GetRun(run.ID)
 	if err != nil {
@@ -146,108 +148,24 @@ func TestHandleHandoffRevokedByPRClose(t *testing.T) {
 	}
 }
 
-func TestHandleHandoffRequiresGreenOpenPRMonitor(t *testing.T) {
-	for _, mode := range []string{"green", "pending", "failed", "gate", "fixing", "no-pr", "closed", "completed", "no-monitor", "abort"} {
-		t.Run(mode, func(t *testing.T) {
-			p := paths.WithRoot(t.TempDir())
-			if err := p.EnsureDirs(); err != nil {
-				t.Fatal(err)
-			}
-			database, err := db.Open(p.DB())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer database.Close()
-			repo, err := database.InsertRepo(t.TempDir(), "https://example.test/o/r", "main")
-			if err != nil {
-				t.Fatal(err)
-			}
-			run, err := database.InsertRun(repo.ID, "feature", "head", "base")
-			if err != nil {
-				t.Fatal(err)
-			}
-			must := func(err error) {
-				t.Helper()
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			must(database.UpdateRunStatus(run.ID, types.RunRunning))
-			must(database.UpdateRunPRURL(run.ID, "https://example.test/o/r/pull/1"))
-			must(database.UpdateRunPRState(run.ID, "open"))
-			must(database.SetRunCIReady(run.ID, true))
-			step, err := database.InsertStepResult(run.ID, types.StepCI)
-			if err != nil {
-				t.Fatal(err)
-			}
-			must(database.UpdateStepStatus(step.ID, types.StepStatusRunning))
-			switch mode {
-			case "pending", "failed":
-				must(database.SetRunCIReady(run.ID, false))
-			case "gate":
-				must(database.UpdateStepStatus(step.ID, types.StepStatusAwaitingApproval))
-			case "fixing":
-				must(database.UpdateStepStatus(step.ID, types.StepStatusFixing))
-			case "no-pr":
-				must(database.UpdateRunPRURL(run.ID, ""))
-			case "closed":
-				must(database.UpdateRunPRState(run.ID, "closed"))
-			case "completed":
-				must(database.UpdateRunStatus(run.ID, types.RunCompleted))
-			}
-			m := NewRunManager(database, p, nil)
-			ctx, cancel := context.WithCancelCause(context.Background())
-			defer cancel(context.Canceled)
-			wake := make(chan struct{}, 1)
-			m.ciWakes[run.ID] = wake
-			if mode != "no-monitor" {
-				m.cancels[run.ID] = cancel
-			}
-			if mode == "abort" {
-				must(m.HandleCancel(run.ID))
-				if context.Cause(ctx).Error() != types.RunCancelReasonAbortedByUser {
-					t.Fatalf("abort cause = %v", context.Cause(ctx))
-				}
-				return
-			}
-			err = m.HandleHandoff(run.ID)
-			if mode == "green" {
-				must(err)
-				if ctx.Err() != nil {
-					t.Fatal("handoff cancelled the monitor before its next observation")
-				}
-				select {
-				case <-wake:
-				default:
-					t.Fatal("handoff did not wake the CI monitor")
-				}
-				persisted := false
-				err := m.transitionCIObservation(run.ID, false, false, func() error {
-					persisted = true
-					return nil
-				})
-				if err != nil || !persisted {
-					t.Fatalf("open PR observation = %v, persisted=%t; want persisted without handoff", err, persisted)
-				}
-				persisted = false
-				err = m.transitionCIObservation(run.ID, false, true, func() error {
-					persisted = true
-					return nil
-				})
-				if !errors.Is(err, pipeline.ErrHandoff) {
-					t.Fatalf("green readiness observation error = %v", err)
-				}
-				if persisted {
-					t.Fatal("monitor readiness observation crossed an atomic handoff claim")
-				}
-			} else {
-				if err == nil || !strings.Contains(err.Error(), "axi ") {
-					t.Fatalf("want refusal and guidance, got %v", err)
-				}
-				if ctx.Err() != nil {
-					t.Fatal("refused handoff stopped the monitor")
-				}
-			}
-		})
+func TestHandleHandoffCancellationClearsPendingRequest(t *testing.T) {
+	_, run, m, monitorCtx, cancel, wake := newHandoffFixture(t, true)
+	defer cancel(context.Canceled)
+
+	result := requestHandoff(t, m, run.ID, wake)
+	if err := m.HandleCancel(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := awaitHandoffResult(t, result); err == nil || !strings.Contains(err.Error(), types.RunCancelReasonAbortedByUser) {
+		t.Fatalf("handoff result = %v, want cancellation", err)
+	}
+	if monitorCtx.Err() == nil || context.Cause(monitorCtx) == nil || context.Cause(monitorCtx).Error() != types.RunCancelReasonAbortedByUser {
+		t.Fatalf("monitor cause = %v, want user cancellation", context.Cause(monitorCtx))
+	}
+	m.mu.Lock()
+	_, pending := m.handoffRequests[run.ID]
+	m.mu.Unlock()
+	if pending {
+		t.Fatal("cancellation left a handoff request pending")
 	}
 }

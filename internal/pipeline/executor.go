@@ -101,8 +101,7 @@ type Executor struct {
 	// ciObservationTransition wraps CI readiness and PR-state writes at a
 	// daemon-owned synchronization boundary. It is nil in standalone executor
 	// embeddings.
-	ciObservationTransition func(runID string, withdrawal, completes bool, persist func() error) error
-	ciHandoffValid          func(runID string) bool
+	ciObservationTransition func(runID string, withdrawal, completes bool, reason string, persist func() error) error
 	ciWake                  func(runID string) <-chan struct{}
 }
 
@@ -118,7 +117,7 @@ func (e *Executor) SetOnPRMerged(fn func(context.Context, string)) {
 // SetCIObservationTransition serializes CI observations with daemon
 // lifecycle decisions. The transition owns the persist callback's critical
 // section; standalone executors use the direct DB path instead.
-func (e *Executor) SetCIObservationTransition(fn func(runID string, withdrawal, completes bool, persist func() error) error) {
+func (e *Executor) SetCIObservationTransition(fn func(runID string, withdrawal, completes bool, reason string, persist func() error) error) {
 	if e == nil {
 		return
 	}
@@ -130,13 +129,6 @@ func (e *Executor) SetCIWake(fn func(runID string) <-chan struct{}) {
 		return
 	}
 	e.ciWake = fn
-}
-
-func (e *Executor) SetCIHandoffValidator(fn func(runID string) bool) {
-	if e == nil {
-		return
-	}
-	e.ciHandoffValid = fn
 }
 
 // SetForgeContext configures the immutable provider context used by every
@@ -1416,7 +1408,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			return nil
 		}
 		if e.ciObservationTransition != nil {
-			return e.ciObservationTransition(run.ID, !ready, ready, persist)
+			reason := ""
+			if !ready {
+				reason = "CI checks are not green"
+			}
+			return e.ciObservationTransition(run.ID, !ready, ready, reason, persist)
 		}
 		return persist()
 	}
@@ -1425,7 +1421,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			return e.db.UpdateRunPRState(run.ID, state)
 		}
 		if e.ciObservationTransition != nil {
-			return e.ciObservationTransition(run.ID, state != "open", false, persist)
+			reason := ""
+			if state != "open" {
+				reason = fmt.Sprintf("PR is %s", state)
+			}
+			return e.ciObservationTransition(run.ID, state != "open", false, reason, persist)
 		}
 		return persist()
 	}
@@ -1491,8 +1491,9 @@ rounds:
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
 			durationMS := executionMS + roundDuration
-			handoff := errors.Is(err, ErrHandoff) || errors.Is(context.Cause(ctx), ErrHandoff)
-			if stepName == types.StepCI && handoff && e.handoffClaimIsValid(run.ID) {
+			contextCause := context.Cause(ctx)
+			handoff := (errors.Is(err, ErrHandoff) || errors.Is(contextCause, ErrHandoff)) && (contextCause == nil || errors.Is(contextCause, ErrHandoff))
+			if stepName == types.StepCI && handoff {
 				if dbErr := e.db.CompleteStep(sr.ID, 0, durationMS, logPath); dbErr != nil {
 					return false, "", dbErr
 				}
@@ -2389,7 +2390,15 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if errors.Is(err, ErrParkedAtShutdown) {
 		return err
 	}
-	if errors.Is(err, ErrHandoff) && e.handoffClaimIsValid(run.ID) {
+	causesHandoff := errors.Is(err, ErrHandoff)
+	for _, ctx := range ctxs {
+		if cause := context.Cause(ctx); cause != nil {
+			if !errors.Is(cause, ErrHandoff) {
+				causesHandoff = false
+			}
+		}
+	}
+	if causesHandoff {
 		return e.completeRunWithStatus(run, repo, types.RunHandedOff)
 	}
 	errMsg := err.Error()
@@ -2419,13 +2428,6 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	run.Error = &errMsg
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	return err
-}
-
-func (e *Executor) handoffClaimIsValid(runID string) bool {
-	if e.ciHandoffValid == nil {
-		return true
-	}
-	return e.ciHandoffValid(runID)
 }
 
 func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
