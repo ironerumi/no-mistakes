@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 )
 
 // HandlerFunc processes a JSON-RPC request and returns a result or error.
@@ -159,7 +160,9 @@ func (s *Server) handleConn(conn net.Conn) {
 	// Handlers use it for process-ancestry authorization; it is never accepted
 	// from request parameters or environment variables.
 	ctx := withPeerPID(context.Background(), authenticatedPeerPID(conn))
-	// Create a context that cancels when the server shuts down.
+	// Create a context that cancels when the server shuts down or the client
+	// disconnects. Regular handlers run concurrently with the read loop so EOF
+	// can cancel a handler that is waiting on a long-running operation.
 	ctx, cancel := context.WithCancel(ctx)
 	go func() {
 		select {
@@ -168,7 +171,18 @@ func (s *Server) handleConn(conn net.Conn) {
 		case <-ctx.Done():
 		}
 	}()
-	defer cancel()
+
+	var responseMu sync.Mutex
+	writeResponse := func(value interface{}) error {
+		responseMu.Lock()
+		defer responseMu.Unlock()
+		return encoder.Encode(value)
+	}
+	var handlers sync.WaitGroup
+	defer func() {
+		cancel()
+		handlers.Wait()
+	}()
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -180,7 +194,9 @@ func (s *Server) handleConn(conn net.Conn) {
 		if err := json.Unmarshal(line, &req); err != nil {
 			slog.Warn("ipc request failed", "method", "<parse>", "error", "invalid json")
 			resp := NewErrorResponse(0, ErrParseError, "invalid json")
-			encoder.Encode(resp)
+			if err := writeResponse(resp); err != nil {
+				return
+			}
 			continue
 		}
 
@@ -190,17 +206,20 @@ func (s *Server) handleConn(conn net.Conn) {
 		s.mu.RUnlock()
 
 		if isStream {
-			stream, err := streamHandler(ctx, req.Params)
+			streamCtx, streamCancel := requestContext(ctx, req)
+			stream, err := streamHandler(streamCtx, req.Params)
 			if err != nil {
 				slog.Warn("ipc stream request failed", "method", req.Method, "error", err)
-				_ = encoder.Encode(NewErrorResponse(req.ID, ErrInternal, err.Error()))
+				_ = writeResponse(NewErrorResponse(req.ID, ErrInternal, err.Error()))
+				streamCancel()
 				return
 			}
+			defer streamCancel()
 			slog.Info("ipc stream request", "method", req.Method)
 			// Acknowledge only after stream preparation has registered its event
 			// source, so the client can safely reconcile as soon as this arrives.
 			resp, _ := NewResponse(req.ID, map[string]bool{"ok": true})
-			if err := encoder.Encode(resp); err != nil {
+			if err := writeResponse(resp); err != nil {
 				slog.Error("write stream response", "error", err)
 				return
 			}
@@ -212,7 +231,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				cancel()
 			}()
 			send := func(event interface{}) error {
-				return encoder.Encode(event)
+				return writeResponse(event)
 			}
 			streamErr := stream(send)
 			_ = conn.Close()
@@ -223,12 +242,35 @@ func (s *Server) handleConn(conn net.Conn) {
 			return // connection done after streaming
 		}
 
-		resp := s.dispatch(ctx, req)
-		if err := encoder.Encode(resp); err != nil {
-			slog.Error("write response", "error", err)
-			return
-		}
+		handlers.Add(1)
+		go func(req Request) {
+			defer handlers.Done()
+			resp := s.dispatch(ctx, req)
+			if err := writeResponse(resp); err != nil {
+				slog.Error("write response", "error", err)
+				cancel()
+			}
+		}(req)
 	}
+	cancel()
+}
+
+type requestDeadlineContextKey struct{}
+
+// RequestDeadline returns the client-side IPC deadline carried by a request.
+// It is metadata rather than the handler's cancellation deadline: an ordinary
+// slow RPC must still be classified by the client's read deadline, while a
+// state-changing operation may choose a shorter domain-specific bound.
+func RequestDeadline(ctx context.Context) (time.Time, bool) {
+	deadline, ok := ctx.Value(requestDeadlineContextKey{}).(time.Time)
+	return deadline, ok
+}
+
+func requestContext(parent context.Context, req Request) (context.Context, context.CancelFunc) {
+	if req.DeadlineUnixNano == 0 {
+		return parent, func() {}
+	}
+	return context.WithValue(parent, requestDeadlineContextKey{}, time.Unix(0, req.DeadlineUnixNano)), func() {}
 }
 
 func (s *Server) dispatch(ctx context.Context, req Request) *Response {
@@ -242,7 +284,9 @@ func (s *Server) dispatch(ctx context.Context, req Request) *Response {
 		return NewErrorResponse(req.ID, ErrMethodNotFound, err)
 	}
 
-	result, err := handler(ctx, req.Params)
+	requestCtx, cancel := requestContext(ctx, req)
+	defer cancel()
+	result, err := handler(requestCtx, req.Params)
 	if err != nil {
 		slog.Warn("ipc request failed", "method", req.Method, "error", err)
 		return NewErrorResponse(req.ID, ErrInternal, err.Error())

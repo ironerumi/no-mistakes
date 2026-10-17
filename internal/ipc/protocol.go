@@ -51,10 +51,11 @@ const (
 
 // Request is a JSON-RPC 2.0 request.
 type Request struct {
-	JSONRPC string          `json:"jsonrpc"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-	ID      int64           `json:"id"`
+	JSONRPC          string          `json:"jsonrpc"`
+	Method           string          `json:"method"`
+	Params           json.RawMessage `json:"params,omitempty"`
+	ID               int64           `json:"id"`
+	DeadlineUnixNano int64           `json:"deadline_unix_nano,omitempty"`
 }
 
 // Response is a JSON-RPC 2.0 response.
