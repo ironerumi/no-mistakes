@@ -94,13 +94,13 @@ func (d *DB) GetBranchDecisionRounds(repoID, branch, excludeRunID string, limit 
 // SetStepRoundDeclined records that a caller resolved this round's approval
 // gate without selecting any finding to fix.
 //
-// The write is conditional on selection_source still being NULL so a decline
-// can never overwrite a selection that was already recorded. Reaching an
-// approval gate on a round that already carries an auto-fix selection is not
-// currently possible - auto-fix continues into a new round instead of
-// gating - but a decline silently erasing a real selection would be a data
-// loss, so the invariant is enforced in the statement rather than assumed by
-// the caller.
+// The write records a new decline, or refreshes the origin on a round that
+// already records this same decline. It never overwrites another selection:
+// reaching an approval gate on a round that already carries an auto-fix
+// selection is not currently possible - auto-fix continues into a new round
+// instead of gating - but a decline silently erasing a real selection would be
+// a data loss, so the invariant is enforced in the statement rather than
+// assumed by the caller.
 func (d *DB) SetStepRoundDeclined(id string, origins ...types.ResponseOrigin) error {
 	origin := types.ResponseOriginUnknown
 	if len(origins) > 0 {
@@ -108,9 +108,12 @@ func (d *DB) SetStepRoundDeclined(id string, origins ...types.ResponseOrigin) er
 	}
 	declined := DeclinedSelectionJSON
 	if _, err := d.sql.Exec(
-		`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?, response_origin = ?
-		  WHERE id = ? AND selection_source IS NULL`,
-		declined, RoundSelectionSourceUserDeclined, origin, id,
+		`UPDATE step_rounds
+		    SET selected_finding_ids = CASE WHEN selection_source IS NULL THEN ? ELSE selected_finding_ids END,
+		        selection_source = CASE WHEN selection_source IS NULL THEN ? ELSE selection_source END,
+		        response_origin = ?
+		  WHERE id = ? AND (selection_source IS NULL OR selection_source = ?)`,
+		declined, RoundSelectionSourceUserDeclined, origin, id, RoundSelectionSourceUserDeclined,
 	); err != nil {
 		return fmt.Errorf("set step round declined: %w", err)
 	}
