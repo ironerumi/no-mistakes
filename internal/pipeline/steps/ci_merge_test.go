@@ -59,6 +59,36 @@ func TestCIStep_HandoffWakeRechecksGreenReadiness(t *testing.T) {
 	}
 }
 
+func TestCIStep_ReadinessWriteFailureWarnsAndKeepsMonitoring(t *testing.T) {
+	for _, tc := range []struct {
+		name, checks, warning string
+	}{
+		{"persist", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`, "could not persist CI readiness"},
+		{"clear", `invalid check response`, "could not clear CI readiness"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+			prURL := "https://github.com/test/repo/pull/42"
+			sctx.Run.PRURL = &prURL
+			sctx.Env = fakeCIGH(t, "OPEN", tc.checks)
+			sctx.Config.CITimeout = time.Minute
+			writeErr := errors.New("readiness write failed")
+			sctx.SetCIReadiness = func(bool, bool) error { return writeErr }
+			var logs []string
+			sctx.Log = func(message string) { logs = append(logs, message) }
+			stop := errors.New("monitor reached next poll")
+			step := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return stop }}
+			if _, err := step.Execute(sctx); !errors.Is(err, stop) {
+				t.Fatalf("monitor error = %v, want next poll", err)
+			}
+			if !strings.Contains(strings.Join(logs, "\n"), "warning: "+tc.warning+": "+writeErr.Error()) {
+				t.Fatalf("logs = %v, want readiness warning", logs)
+			}
+		})
+	}
+}
+
 func TestCIStep_MergeConflictDetected_ReturnsNeedsApproval(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

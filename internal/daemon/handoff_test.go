@@ -161,6 +161,41 @@ func TestHandleHandoffReadinessWithdrawalRefusesAndContinues(t *testing.T) {
 	}
 }
 
+func TestHandleHandoffReadinessWriteFailureRefusesRequest(t *testing.T) {
+	for _, ready := range []bool{false, true} {
+		name := "clear"
+		if ready {
+			name = "persist"
+		}
+		t.Run(name, func(t *testing.T) {
+			database, run, m, monitorCtx, cancel, wake := newHandoffFixture(t, true)
+			defer cancel(context.Canceled)
+			result := requestHandoff(t, m, run.ID, wake)
+			if err := database.Close(); err != nil {
+				t.Fatal(err)
+			}
+			writeErr := m.transitionCIObservation(run.ID, !ready, ready, "", func() error {
+				return database.SetRunCIReady(run.ID, ready)
+			})
+			if writeErr == nil || errors.Is(writeErr, pipeline.ErrHandoff) {
+				t.Fatalf("observation error = %v, want readiness write failure", writeErr)
+			}
+			if err := awaitHandoffResult(t, result); !errors.Is(err, writeErr) {
+				t.Fatalf("handoff result = %v, want %v", err, writeErr)
+			}
+			if monitorCtx.Err() != nil {
+				t.Fatal("refused handoff stopped the monitor")
+			}
+			m.mu.Lock()
+			_, pending := m.handoffRequests[run.ID]
+			m.mu.Unlock()
+			if pending {
+				t.Fatal("failed write left the handoff pending")
+			}
+		})
+	}
+}
+
 func TestHandleHandoffPRCloseRefusesAndContinues(t *testing.T) {
 	database, run, m, monitorCtx, cancel, wake := newHandoffFixture(t, true)
 	defer cancel(context.Canceled)

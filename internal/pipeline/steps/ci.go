@@ -971,12 +971,17 @@ func ciWaitingMessage(checks []scm.Check) string {
 	return ciChecksRunningMsg
 }
 
+// Readiness writes remain best-effort for monitoring. The daemon resolves any
+// pending handoff with the write error; only a committed handoff stops the step.
 func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) (string, error) {
 	if message != previous {
 		ready := message == ciChecksPassedMsg || message == ciNoChecksPassedMsg
 		declaredNoCI := message == ciNoChecksPassedMsg
 		if err := setCIMonitorReadiness(sctx, ready, declaredNoCI); err != nil {
-			return previous, err
+			if errors.Is(err, pipeline.ErrHandoff) {
+				return previous, err
+			}
+			sctx.Log(fmt.Sprintf("warning: could not persist CI readiness: %v", err))
 		}
 		sctx.Log(message)
 	}
@@ -984,7 +989,13 @@ func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) (s
 }
 
 func clearCIMonitorReady(sctx *pipeline.StepContext) error {
-	return setCIMonitorReadiness(sctx, false, false)
+	if err := setCIMonitorReadiness(sctx, false, false); err != nil {
+		if errors.Is(err, pipeline.ErrHandoff) {
+			return err
+		}
+		sctx.Log(fmt.Sprintf("warning: could not clear CI readiness: %v", err))
+	}
+	return nil
 }
 
 func setCIMonitorPRState(sctx *pipeline.StepContext, state string) error {
