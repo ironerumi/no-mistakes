@@ -183,7 +183,7 @@ Existing evidence remains in place.
 Before Push, later steps can commit: Document edits, Lint and Test repairs, a repository gate's repair, and Push's own formatter or leftover-change commit.
 By default Push publishes any descendant of the review-approved commit, so those commits reach the pull request without review; [`axi status`](/no-mistakes/reference/cli/#no-mistakes-axi-status) counts them as `post_review_commits`.
 
-With trusted [`review.post_review_pass: true`](/no-mistakes/reference/repo-config/#reviewpost_review_pass), Push stops before publishing whenever the head it would publish is past the review-approved commit, and the Review step runs again over exactly the commits after that approval:
+With trusted [`review.post_review_pass: true`](/no-mistakes/reference/repo-config/#reviewpost_review_pass), Push stops before publishing whenever the head it would publish is past the review-approved commit, unless Review was explicitly skipped; otherwise the Review step runs again over exactly the commits after that approval:
 
 - The base commit is the review-approved commit, so the reviewable set and the coverage contract are the files those commits changed. The prompt tells the reviewer the commits are pipeline-authored and that the approved change is context only.
 - Findings, the gate, and `auto_fix.review` rounds work as in any review. The pass starts a fresh outstanding set and shares the step's `auto_fix.review` budget, as a restart at Review does. Its first round is recorded with trigger `post_review` and labelled in the PR body's Review details.
@@ -281,7 +281,7 @@ Pushes the validated branch to the configured push target.
 
 - If `commands.format` is set, ensures [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) has succeeded once for the isolated worktree, then runs the formatter
 - Commits any uncommitted changes left by pipeline agents or the formatter with message `no-mistakes: apply agent fixes`, or through a non-default [`commit.fix_message`](/no-mistakes/reference/global-config/#commitfix_message) with step `push` and summary `apply agent fixes`
-- With [`review.post_review_pass`](/no-mistakes/reference/repo-config/#reviewpost_review_pass) on, publishes nothing while the head it would publish is past the review-approved commit: Review first runs a [post-review pass](#post-review-pass) over exactly those commits, then Push runs again from the top. Skipping a parked post-review pass is the explicit decision to publish without it; skipping Review before any approval leaves Push fail-closed.
+- With [`review.post_review_pass`](/no-mistakes/reference/repo-config/#reviewpost_review_pass) on, normally publishes nothing while the head it would publish is past the review-approved commit: Review first runs a [post-review pass](#post-review-pass) over exactly those commits, then Push runs again from the top. Skipping a parked post-review pass is the explicit decision to publish without it; skipping Review before any approval leaves Push fail-closed.
 - Without fork routing, successful run-start validation selects the upstream URL from the working clone; when it matches the gate worktree's `origin`, the worktree URL is used so embedded credentials retained outside the database can authenticate. If validation fails, the run continues with its prior routing.
 - With GitHub fork routing, the push target is `repos.fork_url`
 - Immediately before remote mutation, reloads the durable review-approved commit and refuses to push when that binding is missing, malformed, or unreachable
@@ -301,7 +301,7 @@ A remote branch can move without being rejected when all remote commits are alre
 Any other out-of-band commit stops the push instead of being overwritten.
 Pre-skipping or later skipping Review leaves no approval binding, so Push fails closed unless Push is also skipped.
 
-This step never requires approval - it runs automatically after review, test, document, and lint pass.
+This step does not create its own approval gate and normally runs automatically after review, test, document, and lint pass. With [`review.post_review_pass`](/no-mistakes/reference/repo-config/#reviewpost_review_pass), Push can instead return the pipeline to Review, whose post-review pass may require approval before Push resumes.
 
 ## PR
 
