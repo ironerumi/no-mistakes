@@ -57,15 +57,15 @@ func TestResponseOriginMigratesOldRowsAsUnknown(t *testing.T) {
 			t.Fatal(err)
 		}
 		got, err := d.GetStepResult(step.ID)
-		if err != nil || got.ResponseOrigin != types.ResponseOriginUnknown {
+		if err != nil || string(got.ResponseOrigin) != "unknown" {
 			t.Fatalf("legacy step = %+v, err %v", got, err)
 		}
 		rounds, err := d.GetRoundsByStep(step.ID)
-		if err != nil || len(rounds) != 1 || rounds[0].ResponseOrigin != types.ResponseOriginUnknown {
+		if err != nil || len(rounds) != 1 || string(rounds[0].ResponseOrigin) != "unknown" {
 			t.Fatalf("legacy rounds = %+v, err %v", rounds, err)
 		}
 		decisions, _, err := d.GetBranchDecisionRounds(repo.ID, run.Branch, "other-run", 10)
-		if err != nil || len(decisions) != 1 || decisions[0].Round.ResponseOrigin != types.ResponseOriginUnknown {
+		if err != nil || len(decisions) != 1 || string(decisions[0].Round.ResponseOrigin) != "unknown" {
 			t.Fatalf("legacy decisions = %+v, err %v", decisions, err)
 		}
 		if err := d.Close(); err != nil {
@@ -88,20 +88,20 @@ func TestResponseOriginDoesNotInferFromSelectionSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	rounds, err := d.GetRoundsByStep(step.ID)
-	if err != nil || rounds[0].ResponseOrigin != types.ResponseOriginUnknown {
+	if err != nil || string(rounds[0].ResponseOrigin) != "unknown" {
 		t.Fatalf("inferred origin: %+v, %v", rounds, err)
 	}
-	if err := d.SetStepResponseOrigin("missing-step", types.ResponseOriginAutoYes); err == nil {
+	if err := d.SetStepResponseOrigin("missing-step", types.ResponseOrigin("auto_yes")); err == nil {
 		t.Fatal("missing decision owner accepted")
 	}
-	if err := d.SetStepResponseOrigin(step.ID, types.ResponseOriginInteractive); err != nil {
+	if err := d.SetStepResponseOrigin(step.ID, types.ResponseOrigin("interactive")); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.ResetStepsFrom(run.ID, 0); err != nil {
 		t.Fatal(err)
 	}
 	got, err := d.GetStepResult(step.ID)
-	if err != nil || got.ResponseOrigin != types.ResponseOriginUnknown {
+	if err != nil || string(got.ResponseOrigin) != "unknown" {
 		t.Fatalf("reset retained stale origin: %+v, %v", got, err)
 	}
 }

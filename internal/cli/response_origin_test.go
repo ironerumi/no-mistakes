@@ -14,12 +14,15 @@ import (
 )
 
 func TestGateResponseCallerOrigin(t *testing.T) {
-	for _, automatic := range []bool{false, true} {
-		name := "manual"
-		want := types.ResponseOriginInteractive
-		if automatic {
-			name, want = "auto_yes", types.ResponseOriginAutoYes
-		}
+	for _, tc := range []struct {
+		automatic bool
+		name      string
+		want      string
+	}{
+		{false, "manual", "interactive"},
+		{true, "auto_yes", "auto_yes"},
+	} {
+		automatic, name, want := tc.automatic, tc.name, tc.want
 		t.Run(name, func(t *testing.T) {
 			for _, findings := range []string{"", `{"findings":[{"id":"R1","severity":"warning","description":"repair","action":"auto-fix"}]}`} {
 				t.Run(findings, func(t *testing.T) {
@@ -77,7 +80,7 @@ func TestGateResponseCallerOrigin(t *testing.T) {
 					}
 					select {
 					case params := <-received:
-						if params.Origin != want {
+						if string(params.Origin) != want {
 							t.Fatalf("origin = %q, want %q", params.Origin, want)
 						}
 						action := types.ActionApprove
