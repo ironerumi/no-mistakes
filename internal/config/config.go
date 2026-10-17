@@ -203,6 +203,8 @@ type GlobalConfig struct {
 	CITimeout                 time.Duration `yaml:"-"`
 	StepQuietWarning          time.Duration `yaml:"-"`
 	AgentTimeout              time.Duration `yaml:"-"`
+	AgentCrashRetries         int           `yaml:"-"`
+	AgentTimeoutsConfigured   bool          `yaml:"-"`
 	ReviewAgentTimeout        time.Duration `yaml:"-"`
 	TestAgentTimeout          time.Duration `yaml:"-"`
 	AgentWorkingTimeout       time.Duration `yaml:"-"`
@@ -277,6 +279,7 @@ type globalConfigRaw struct {
 	BabysitTimeout            string                     `yaml:"babysit_timeout"`
 	StepQuietWarning          string                     `yaml:"step_quiet_warning"`
 	AgentTimeout              string                     `yaml:"agent_timeout"`
+	AgentCrashRetries         int                        `yaml:"agent_crash_retries"`
 	ReviewAgentTimeout        string                     `yaml:"review_agent_timeout"`
 	TestAgentTimeout          string                     `yaml:"test_agent_timeout"`
 	AgentWorkingTimeout       string                     `yaml:"agent_working_timeout"`
@@ -824,6 +827,8 @@ type Config struct {
 	CITimeout                 time.Duration
 	StepQuietWarning          time.Duration
 	AgentTimeout              time.Duration
+	AgentCrashRetries         int
+	AgentTimeoutsConfigured   bool
 	ReviewAgentTimeout        time.Duration
 	TestAgentTimeout          time.Duration
 	AgentWorkingTimeout       time.Duration
@@ -1416,6 +1421,10 @@ step_quiet_warning: "10m"
 # A turn with no output and no live child stops here. A still-working turn
 # continues past it only when agent_working_timeout is set.
 agent_timeout: "30m"
+
+# Additional attempts for an agent-crashed validation step (0-3, opt-in).
+# Requires unchanged head, base, config, clean worktree and evidence.
+agent_crash_retries: 0
 
 # Optional cap for a turn that is still producing output or waiting on a live
 # child. Unset means no extension past agent_timeout. Must be at least
@@ -2589,6 +2598,12 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			cfg.StepQuietWarning = d
 		}
 	}
+	if raw.AgentCrashRetries < 0 || raw.AgentCrashRetries > 3 {
+		return nil, fmt.Errorf("agent_crash_retries must be between 0 and 3")
+	}
+	cfg.AgentCrashRetries = raw.AgentCrashRetries
+	cfg.AgentTimeoutsConfigured = raw.AgentTimeout != "" || raw.ReviewAgentTimeout != "" || raw.TestAgentTimeout != "" ||
+		raw.AgentWorkingTimeout != "" || raw.ReviewAgentWorkingTimeout != "" || raw.TestAgentWorkingTimeout != ""
 	if raw.AgentTimeout != "" {
 		d, err := parsePositiveDuration("agent_timeout", raw.AgentTimeout)
 		if err != nil {
@@ -3750,6 +3765,8 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		CITimeout:                 global.CITimeout,
 		StepQuietWarning:          global.StepQuietWarning,
 		AgentTimeout:              global.AgentTimeout,
+		AgentCrashRetries:         global.AgentCrashRetries,
+		AgentTimeoutsConfigured:   global.AgentTimeoutsConfigured,
 		ReviewAgentTimeout:        global.ReviewAgentTimeout,
 		TestAgentTimeout:          global.TestAgentTimeout,
 		AgentWorkingTimeout:       global.AgentWorkingTimeout,
