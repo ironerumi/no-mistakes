@@ -163,7 +163,33 @@ func mergeFindingsJSON(existingRaw, additionalRaw string) string {
 		merged.Items = append(merged.Items, item)
 		seen[findingKey(item)] = true
 	}
+additions:
 	for _, item := range additional.Items {
+		if item.Source == types.FindingSourceUser {
+			// A gate selection names the user's ID. Content deduplication must
+			// not discard that record (including its action and instructions).
+			for i, previous := range merged.Items {
+				matches := findingKey(previous) == findingKey(item) ||
+					(additionalCounts[findingFingerprint(item)] == 1 && existingCounts[findingFingerprint(item)] == 1 &&
+						findingFingerprint(previous) == findingFingerprint(item))
+				if !matches {
+					continue
+				}
+				if previous.Source == types.FindingSourceUser && previous.ID == item.ID {
+					continue additions
+				}
+				if previous.Source != types.FindingSourceUser && previous.Action == types.ActionNoOp {
+					merged.Items[i] = item
+					seen[findingKey(item)] = true
+					continue additions
+				}
+			}
+			// Keep independently selected user records and blocking findings
+			// alongside each other rather than losing either identity.
+			merged.Items = append(merged.Items, item)
+			seen[findingKey(item)] = true
+			continue
+		}
 		if hasFindingMatch(item, seen, additionalCounts, existingCounts) {
 			continue
 		}
@@ -465,6 +491,20 @@ func remapFindingIDsJSON(mergedRaw, selectedRaw string) string {
 	used := make(map[int]bool, len(selected.Items))
 	for i := range selected.Items {
 		matched := false
+		// A preserved user addition already has its selected identity. Prefer
+		// it over a content-equivalent record kept alongside it.
+		if selected.Items[i].Source == types.FindingSourceUser {
+			for j := range merged.Items {
+				if !used[j] && merged.Items[j].Source == types.FindingSourceUser && selected.Items[i].ID == merged.Items[j].ID && SameFinding(selected.Items[i], merged.Items[j]) {
+					used[j] = true
+					matched = true
+					break
+				}
+			}
+		}
+		if matched {
+			continue
+		}
 		for j := range merged.Items {
 			if used[j] || findingKey(selected.Items[i]) != findingKey(merged.Items[j]) {
 				continue
