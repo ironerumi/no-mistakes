@@ -212,6 +212,12 @@ var terminalNeedles = []struct {
 	{"quota_exceeded", "quota exceeded"},
 	{"quota exhausted", "quota exhausted"},
 	{"quota_exhausted", "quota exhausted"},
+	{"permission denied", "permission denied"},
+	{"authentication", "authentication failure"},
+	{"unauthorized", "unauthorized"},
+	{"forbidden", "forbidden"},
+	{"401", "http 401"},
+	{"403", "http 403"},
 }
 
 // classifyTransient reports whether an error message looks like a transient

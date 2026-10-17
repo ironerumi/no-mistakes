@@ -91,6 +91,11 @@ func TestClassifyTransient_Positive(t *testing.T) {
 			wantSub: "missing output tool",
 		},
 		{
+			name:    "pi missing output tool with benign stderr",
+			errMsg:  `pi did not finish by calling no_mistakes_output alone: transient provider response`,
+			wantSub: "missing output tool",
+		},
+		{
 			name:    "pi fetch failed",
 			errMsg:  `pi exited: exit status 1: fetch failed`,
 			wantSub: "fetch failed",
@@ -147,6 +152,18 @@ func TestClassifyTransient_Negative(t *testing.T) {
 		{
 			name:   "pi model access denied",
 			errMsg: `pi exited: unable to verify model access: 403 forbidden`,
+		},
+		{
+			name:   "pi missing output unauthorized",
+			errMsg: `pi did not finish by calling no_mistakes_output alone: unable to verify model access: 401 unauthorized`,
+		},
+		{
+			name:   "pi missing output permission denied",
+			errMsg: `pi did not finish by calling no_mistakes_output alone: permission denied`,
+		},
+		{
+			name:   "pi missing output forbidden",
+			errMsg: `pi did not finish by calling no_mistakes_output alone: unable to verify model access: 403 forbidden`,
 		},
 		{
 			name:   "pi schema validation",
