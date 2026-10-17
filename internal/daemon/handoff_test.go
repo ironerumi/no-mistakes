@@ -52,6 +52,7 @@ func newHandoffFixture(t *testing.T, ready bool) (*db.DB, *db.Run, *RunManager, 
 	monitorCtx, cancel := context.WithCancelCause(context.Background())
 	wake := make(chan struct{}, 1)
 	m.cancels[run.ID] = cancel
+	m.ciMonitorActive[run.ID] = true
 	m.ciWakes[run.ID] = wake
 	return database, run, m, monitorCtx, cancel, wake
 }
@@ -77,6 +78,16 @@ func awaitHandoffResult(t *testing.T, result <-chan error) error {
 	case <-time.After(2 * time.Second):
 		t.Fatal("handoff request was not resolved by the CI monitor")
 		return nil
+	}
+}
+
+func TestHandleHandoffAfterMonitorExitRefusesImmediately(t *testing.T) {
+	_, run, m, _, cancel, _ := newHandoffFixture(t, true)
+	defer cancel(context.Canceled)
+
+	m.transitionCIMonitorLifecycle(run.ID, false)
+	if err := m.HandleHandoff(context.Background(), run.ID); err == nil || !strings.Contains(err.Error(), "actively monitoring") {
+		t.Fatalf("handoff error = %v, want immediate monitor refusal", err)
 	}
 }
 
