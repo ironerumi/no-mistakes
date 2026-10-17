@@ -46,7 +46,7 @@ func (d *DB) GetBranchDecisionRounds(repoID, branch, excludeRunID string, limit 
 		        sr.reviewed_head_sha, sr.starting_head_sha, sr.trusted_config_sha,
 		        sr.global_config_yaml, sr.repo_config_yaml, sr.user_findings_json,
 		        sr.selected_finding_ids, sr.selection_source, sr.fix_summary,
-		        sr.duration_ms, sr.created_at,
+		        sr.duration_ms, sr.created_at, sr.response_origin,
 		        res.step_name, res.run_id
 		   FROM step_rounds sr
 		   JOIN step_results res ON res.id = sr.step_result_id
@@ -74,7 +74,7 @@ func (d *DB) GetBranchDecisionRounds(repoID, branch, excludeRunID string, limit 
 			&r.ReviewedHeadSHA, &r.StartingHeadSHA, &r.TrustedConfigSHA,
 			&r.GlobalConfigYAML, &r.RepoConfigYAML, &r.UserFindingsJSON,
 			&r.SelectedFindingIDs, &r.SelectionSource, &r.FixSummary,
-			&r.DurationMS, &r.CreatedAt,
+			&r.DurationMS, &r.CreatedAt, &r.ResponseOrigin,
 			&entry.StepName, &entry.RunID,
 		); err != nil {
 			return nil, false, fmt.Errorf("scan branch decision round: %w", err)
@@ -101,12 +101,16 @@ func (d *DB) GetBranchDecisionRounds(repoID, branch, excludeRunID string, limit 
 // gating - but a decline silently erasing a real selection would be a data
 // loss, so the invariant is enforced in the statement rather than assumed by
 // the caller.
-func (d *DB) SetStepRoundDeclined(id string) error {
+func (d *DB) SetStepRoundDeclined(id string, origins ...types.ResponseOrigin) error {
+	origin := types.ResponseOriginUnknown
+	if len(origins) > 0 {
+		origin = origins[0].OrUnknown()
+	}
 	declined := DeclinedSelectionJSON
 	if _, err := d.sql.Exec(
-		`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?
+		`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?, response_origin = ?
 		  WHERE id = ? AND selection_source IS NULL`,
-		declined, RoundSelectionSourceUserDeclined, id,
+		declined, RoundSelectionSourceUserDeclined, origin, id,
 	); err != nil {
 		return fmt.Errorf("set step round declined: %w", err)
 	}

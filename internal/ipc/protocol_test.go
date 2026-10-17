@@ -239,6 +239,34 @@ func TestRespondParams(t *testing.T) {
 	}
 }
 
+func TestRespondParamsOrigin(t *testing.T) {
+	for _, raw := range []string{
+		`{"run_id":"run123","step":"review","action":"approve"}`,
+		`{"run_id":"run123","step":"review","action":"approve","origin":"interactive"}`,
+		`{"run_id":"run123","step":"review","action":"fix","origin":"auto_yes"}`,
+	} {
+		var params RespondParams
+		if err := json.Unmarshal([]byte(raw), &params); err != nil {
+			t.Fatal(err)
+		}
+		want := params.Origin.OrUnknown()
+		if params.Origin == "" && want != types.ResponseOriginUnknown {
+			t.Fatal("legacy response acquired an inferred origin")
+		}
+		encoded, err := json.Marshal(params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var roundTrip RespondParams
+		if err := json.Unmarshal(encoded, &roundTrip); err != nil {
+			t.Fatal(err)
+		}
+		if roundTrip.Origin.OrUnknown() != want {
+			t.Fatalf("origin changed on round trip: %s", encoded)
+		}
+	}
+}
+
 func TestRunInfoRoundTrip(t *testing.T) {
 	prURL := "https://github.com/user/repo/pull/42"
 	submittedHead := "submitted123"

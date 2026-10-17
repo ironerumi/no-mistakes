@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS step_results (
     agent_pid        INTEGER,
     auto_fix_limit              INTEGER,
     ci_fix_attempts             INTEGER NOT NULL DEFAULT 0,
-    override_reason             TEXT
+    override_reason             TEXT,
+    response_origin             TEXT NOT NULL DEFAULT 'unknown'
 );
 
 CREATE TABLE IF NOT EXISTS step_rounds (
@@ -87,6 +88,7 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     user_findings_json   TEXT,
     selected_finding_ids TEXT,
     selection_source     TEXT,
+    response_origin      TEXT NOT NULL DEFAULT 'unknown',
     fix_summary          TEXT,
     repair_published     INTEGER NOT NULL DEFAULT 0,
     duration_ms          INTEGER NOT NULL,
@@ -380,4 +382,6 @@ var migrationStatements = []string{
 	// Set with a CI repair's carried review approval and cleared by the next
 	// publication (UpdateRunHeadSHAWithCarriedReview / UpdateRunPublication).
 	`ALTER TABLE runs ADD COLUMN ci_test_restart_pending INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE step_results ADD COLUMN response_origin TEXT NOT NULL DEFAULT 'unknown'`,
+	`ALTER TABLE step_rounds ADD COLUMN response_origin TEXT NOT NULL DEFAULT 'unknown'`,
 }
