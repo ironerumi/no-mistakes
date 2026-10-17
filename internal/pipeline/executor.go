@@ -2459,12 +2459,12 @@ func (e *Executor) emitRunEvent(eventType ipc.EventType, run *db.Run, repo *db.R
 		Error:  run.Error,
 		PRURL:  run.PRURL,
 	}
-	// A completed run may have a Test exception or CI approval override; the TUI
+	// A successful terminal run may have a Test exception or CI approval override; the TUI
 	// banner reads the reason off the delta (like PRURL) so it never needs a
 	// snapshot to distinguish it from a genuinely green run. Derived from step
 	// rows so both ActionApprove sites (live wait and Resume) are covered.
-	// Gated on the terminal status, not the event type: errorRun emits the same
-	// event for failed/cancelled runs, whose banner never reads it.
+	// Gated on the successful terminal status, not the event type: errorRun emits
+	// the same event for failed/cancelled runs, whose banner never reads it.
 	if run.Status == types.RunCompleted || run.Status == types.RunHandedOff {
 		if steps, err := e.db.GetStepsByRun(run.ID); err == nil {
 			ciReason, testReason := completionOverrideReasons(steps)
