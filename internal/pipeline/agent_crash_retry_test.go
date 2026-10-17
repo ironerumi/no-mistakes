@@ -45,6 +45,39 @@ func TestExecutor_AgentCrashRetryDoesNotRetryGitExit(t *testing.T) {
 	}
 }
 
+func TestExecutor_AgentCrashRetryFirstPushUsesResolvedBase(t *testing.T) {
+	database, p, _, repo := setupTest(t)
+	work := t.TempDir()
+	initGitRepo(t, work)
+	head, err := git.HeadSHA(context.Background(), work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "first-push", head, strings.Repeat("0", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	ag := &hangingAgent{name: "first-push", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		calls++
+		if calls == 1 {
+			return nil, processExitError{"agent process exited: exit status 1"}
+		}
+		return &agent.Result{}, nil
+	}}
+	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if err := sctx.CheckAgentCrashRetryBase(head); err != nil {
+			return nil, err
+		}
+		_, err := sctx.RunAgent(agent.RunOpts{})
+		return &StepOutcome{}, err
+	}}
+	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, ag, []Step{step}, nil)
+	if err := executor.Execute(context.Background(), run, repo, work); err != nil || calls != 2 {
+		t.Fatalf("first-push crash retry = %v, calls=%d; want success after one retry", err, calls)
+	}
+}
+
 func TestExecutor_AgentCrashRetry(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

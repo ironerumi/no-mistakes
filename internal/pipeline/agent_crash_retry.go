@@ -91,8 +91,14 @@ func (e *Executor) crashRetryProof(sctx *StepContext) (crashRetryProof, error) {
 	if live.Status != types.RunRunning || head != live.HeadSHA || head != sctx.Run.HeadSHA || live.BaseSHA != sctx.Run.BaseSHA {
 		return zero, errors.New("run or worktree head/base changed")
 	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "cat-file", "-e", live.BaseSHA+"^{commit}"); err != nil {
-		return zero, err
+	validationBase := live.BaseSHA
+	if e.crashRetryBaseSHA != "" {
+		validationBase = e.crashRetryBaseSHA
+	}
+	if !git.IsZeroSHA(validationBase) {
+		if _, err := git.Run(ctx, sctx.WorkDir, "cat-file", "-e", validationBase+"^{commit}"); err != nil {
+			return zero, err
+		}
 	}
 	// Include ignored files: a crashed agent can leave partial work there too.
 	status, err := git.Run(ctx, sctx.WorkDir, "status", "--porcelain=v1", "--untracked-files=all", "--ignored")
