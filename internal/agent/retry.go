@@ -92,14 +92,14 @@ func runWithRetry(
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			if err := budgetForRetry(); err != nil {
-				return lastResult, err
+				return lastResult, &exhaustedTransientRetries{err: err}
 			}
 			emitAgentRetry(opts, name, lastLabel, attempt+1, maxRetries+1)
 			if err := transientBackoff(ctx, attempt); err != nil {
 				return lastResult, err
 			}
 			if err := budgetForRetry(); err != nil {
-				return lastResult, err
+				return lastResult, &exhaustedTransientRetries{err: err}
 			}
 		}
 		startedAt := time.Now()

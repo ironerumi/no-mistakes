@@ -639,6 +639,9 @@ func TestRunWithRetry_SkipsRetryWhenFirstAttemptConsumedTheBudget(t *testing.T) 
 	if !strings.Contains(err.Error(), "retry skipped") || !strings.Contains(err.Error(), "step budget") {
 		t.Fatalf("err = %q, want a skipped-for-budget message", err)
 	}
+	if !IsTerminalProviderError(err) {
+		t.Fatal("budget-skipped adapter exhaustion must be terminal")
+	}
 }
 
 func TestRunWithRetry_SkipsRetryWhenBackoffConsumesTheRemainingBudget(t *testing.T) {
@@ -667,6 +670,9 @@ func TestRunWithRetry_SkipsRetryWhenBackoffConsumesTheRemainingBudget(t *testing
 	}
 	if !errors.Is(err, transientErr) || !strings.Contains(err.Error(), "retry skipped") {
 		t.Fatalf("err = %v, want a skipped-for-budget error wrapping the original", err)
+	}
+	if !IsTerminalProviderError(err) {
+		t.Fatal("backoff-budget-skipped adapter exhaustion must be terminal")
 	}
 }
 
