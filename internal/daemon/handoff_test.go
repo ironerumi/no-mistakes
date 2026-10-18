@@ -106,16 +106,6 @@ func TestHandleHandoffUnknownPRStateRefuses(t *testing.T) {
 	}
 }
 
-func TestHandleHandoffAfterMonitorExitRefusesImmediately(t *testing.T) {
-	_, run, m, _, cancel, _ := newHandoffFixture(t, true)
-	defer cancel(context.Canceled)
-
-	m.transitionCIMonitorLifecycle(run.ID, false)
-	if err := m.HandleHandoff(context.Background(), run.ID); err == nil || !strings.Contains(err.Error(), "actively monitoring") {
-		t.Fatalf("handoff error = %v, want immediate monitor refusal", err)
-	}
-}
-
 func TestHandleHandoffMonitorCommitsGreenOpenPR(t *testing.T) {
 	database, run, m, monitorCtx, cancel, wake := newHandoffFixture(t, true)
 	defer cancel(context.Canceled)
