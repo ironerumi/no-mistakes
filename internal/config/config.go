@@ -1407,7 +1407,8 @@ forgejo_axi_path: forgejo-axi
 # it has a merge conflict (or, with ci.rebase_behind, when GitHub reports it
 # green but BEHIND); each base advance re-arms this timer, so an
 # actively-updated green PR keeps its monitor. Set to "unlimited", "none", "off", "never", or any
-# non-positive duration to monitor until the PR is merged, closed, or the run is
+# non-positive duration to monitor until the PR is merged, closed, explicitly
+# handed off with no-mistakes axi handoff, or the run is
 # aborted with: no-mistakes axi abort --run <id>
 ci_timeout: "168h"
 
