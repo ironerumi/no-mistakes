@@ -103,7 +103,7 @@ no-mistakes axi
 ```
 
 With no subcommand, shows the executable path, description, repo, current branch, daemon state, recent runs, and next-step help, including a pointer to `no-mistakes axi run --help` and the installed `/no-mistakes` skill for full driving guidance.
-When the current branch has an active run, that run appears as `active_run` with any approval gate and help for `axi respond` when it is parked or `axi status` when it is still running.
+When the current branch has an active run, that run appears as `active_run` with any approval gate and help for `axi respond` when it is parked or `axi status` when it is still running. Its run-object fields are the same ones documented under [`axi status`](#no-mistakes-axi-status), including the optional post-review reporting field.
 If an active run object is parked at a decision gate, it includes `awaiting_agent: parked <duration>` immediately after `status`.
 That field is observability only; the `gate:` object still tells the agent which response to send.
 If a step is actively `running` or `fixing`, the run object can also include an `active_steps` table with step-scoped `active_for`, current-round `round_active_for`, `last_activity`, native `agent_pid` when one is currently running, and the current execution or fix round.
