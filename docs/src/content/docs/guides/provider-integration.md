@@ -214,8 +214,9 @@ well as their SSH forms (`git@ssh.dev.azure.com:v3/...`).
   [`pr.template`](/no-mistakes/reference/repo-config/#prtemplate) for
   author-preserving publication and its provider limits.
 - CI status polling - Azure branch policy evaluations (build validation and
-  status checks) are read via `az repos pr policy list` until the PR is
-  completed, abandoned, or the configured `ci_timeout` idle window elapses
+  status checks) are read via `az repos pr policy list` while the CI monitor is
+  active; see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci)
+  for its lifecycle and handoff controls
 - Merge-conflict polling and auto-fix from the PR's `mergeStatus`
 
 **What you don't get (yet):**
