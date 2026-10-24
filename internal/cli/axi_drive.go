@@ -1068,9 +1068,10 @@ func emitLaunchReceipt(cmd *cobra.Command, receipt ipc.LaunchReceipt) {
 // does a gate holding an open review question or an unreadable question history
 // (pipeline.HasUnansweredReviewQuestion / HasUnreadableReviewQuestionHistory).
 //
-// The CI step keeps monitoring an open PR until a human merges or closes it (a
-// live status the TUI shows), so it never reaches a terminal state on its own
-// by default. An agent driving the run must not block on that human action, so
+// The CI step keeps monitoring an open PR until a human merges or closes it, or
+// explicitly hands it off (a live status the TUI shows), so it never reaches a
+// terminal state on its own by default. An agent driving the run must not block
+// on that human action, so
 // once CI checks pass driveRun returns with ciReady=true: the change is
 // validated and the PR is ready for a human to merge. The daemon keeps
 // monitoring in the background. Under the opt-in ci.release_after_checks_pass

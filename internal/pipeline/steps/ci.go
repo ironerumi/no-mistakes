@@ -1072,7 +1072,7 @@ func ciReadyMessage(message string) (ready, declaredNoCI bool) {
 
 // ciReleaseAfterChecksPass reports whether the operator opted into finishing the
 // run at the checks verdict. The default is off: the monitor keeps watching the
-// PR until it is merged or closed, exactly as it always has.
+// PR until it is merged or closed, unless an operator explicitly hands it off.
 func ciReleaseAfterChecksPass(sctx *pipeline.StepContext) bool {
 	return sctx != nil && sctx.Config != nil && sctx.Config.CI.ReleaseAfterChecksPass
 }
