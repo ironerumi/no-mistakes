@@ -22,6 +22,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/quotarouting"
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
@@ -246,8 +247,8 @@ type ResponseOptions struct {
 // the fix agent runs; ignoreFindingIDs are the findings the response declines,
 // and a fix response must account for every finding the gate shows unless an
 // earlier round of this step already decided it (see splitFixResponse).
-// approvalReason is only accepted for Test approval and is never passed to a
-// fix agent.
+// approvalReason is only accepted for Test approval and for an abort, where it
+// is the operator's recorded reason; it is never passed to a fix agent.
 //
 // It returns the dispositions the response recorded, which the daemon echoes
 // to the caller.
@@ -257,8 +258,8 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		option = options[0]
 	}
 	coverage := []*ipc.CoverageBinding{option.Coverage}
-	if approvalReason != "" && (step != types.StepTest || action != types.ActionApprove) {
-		return RespondDispositions{}, fmt.Errorf("an approval reason applies only to Test approval")
+	if approvalReason != "" && action != types.ActionAbort && (step != types.StepTest || action != types.ActionApprove) {
+		return RespondDispositions{}, fmt.Errorf("a reason applies only to Test approval or an abort")
 	}
 	// The gate loop dispatches on the action, so an unknown one is refused
 	// here while the gate stays parked for a valid response, rather than
@@ -887,11 +888,12 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
 	case types.ActionAbort:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
-		if dbErr := e.db.FailStep(gate.stepResult.ID, "aborted by user", duration); dbErr != nil {
+		abortError := types.UserAbortStepError(response.approvalReason)
+		if dbErr := e.db.FailStep(gate.stepResult.ID, abortError, duration); dbErr != nil {
 			slog.Warn("failed to mark recovered step as aborted", "step", gate.step.Name(), "error", dbErr)
 		}
-		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "aborted by user", &duration)
-		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
+		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", abortError, &duration)
+		return e.failRun(run, repo, fmt.Errorf("step %s: %s", gate.step.Name(), abortError), ctx)
 	// A fix round and an answered review question re-enter the same step the
 	// same way; only the bookkeeping before it and the state handed in differ.
 	// An answer is not a verdict, so it records no selection on the round -
@@ -1284,6 +1286,17 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				slog.Warn("failed to touch step activity in db", "step", stepName, "error", dbErr)
 			}
 			return
+		case agent.LifecyclePhaseQuotaSwitch:
+			// The quota-aware mid-run switch already happened in the agent
+			// chain; amend the run's quota-routing record with it. Any failure
+			// here is an observability gap, never a run failure - the switch
+			// cannot be un-happened and the run continues on the next agent.
+			quotarouting.RecordSwitch(e.db, sr.RunID, quotarouting.SwitchEvent{
+				From:   event.Agent,
+				To:     event.NextAgent,
+				Reason: event.Message,
+				At:     time.Now(),
+			})
 		default:
 			if dbErr := e.db.TouchStepActivity(sr.ID, text); dbErr != nil {
 				slog.Warn("failed to touch step activity in db", "step", stepName, "error", dbErr)
@@ -1485,6 +1498,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	var skipReason string
 	currentRoundID := state.currentRoundID
 	var reviewApprovedHeadSHA string
+	var ciReadyNoCIOnCompletion *bool
 	var restartFrom types.StepName
 
 	// Crash retries have a separate per-step budget, never a fix-round credit.
@@ -1695,6 +1709,7 @@ rounds:
 			// Step completed without needing approval.
 			// Any remaining info-only or non-blocking findings
 			// are acceptable and don't block the pipeline.
+			ciReadyNoCIOnCompletion = outcome.CIReadyNoCI
 			skipRemaining = outcome.SkipRemaining
 			stepSkipped = outcome.Skipped
 			skipReason = safeurl.RedactText(outcome.SkipReason)
@@ -1802,11 +1817,12 @@ rounds:
 
 			case types.ActionAbort:
 				e.recordDeclinedRound(currentRoundID, effectiveFindings, stepName, roundNum)
-				if dbErr := e.db.FailStep(sr.ID, "aborted by user", executionMS); dbErr != nil {
+				abortError := types.UserAbortStepError(response.approvalReason)
+				if dbErr := e.db.FailStep(sr.ID, abortError, executionMS); dbErr != nil {
 					slog.Warn("failed to mark step as aborted", "step", stepName, "error", dbErr)
 				}
-				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "aborted by user", &executionMS)
-				return false, "", fmt.Errorf("step %s: aborted by user", stepName)
+				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", abortError, &executionMS)
+				return false, "", fmt.Errorf("step %s: %s", stepName, abortError)
 
 			case types.ActionFix:
 				telemetry.Track("fix", e.fixTelemetryFields("user", stepName, selectedFindingCount(effectiveFindings, response.findingIDs), 0))
@@ -1935,6 +1951,10 @@ done:
 		reviewedHead := reviewApprovedHeadSHA
 		run.ReviewApprovedHeadSHA = &reviewedHead
 		ClearUncertifiedPipelineRangeIfCertified(ctx, e.db, repo.ID, run.Branch, reviewedHead, workDir)
+	} else if stepName == types.StepCI && !stepSkipped && ciReadyNoCIOnCompletion != nil {
+		if err := e.db.CompleteCIStep(sr.ID, run.ID, *ciReadyNoCIOnCompletion, finalExitCode, durationMS, logPath); err != nil {
+			return false, "", fmt.Errorf("complete step %s: %w", stepName, err)
+		}
 	} else if stepSkipped {
 		if err := e.db.CompleteSkippedStep(sr.ID, finalExitCode, durationMS, logPath, skipReason); err != nil {
 			return false, "", fmt.Errorf("complete skipped step %s: %w", stepName, err)
@@ -1943,6 +1963,9 @@ done:
 		return false, "", fmt.Errorf("complete step %s: %w", stepName, err)
 	}
 	e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(status), "", "", &durationMS)
+	if stepName == types.StepCI && !stepSkipped && ciReadyNoCIOnCompletion != nil {
+		ciReadinessChanged(true, *ciReadyNoCIOnCompletion)
+	}
 	return skipRemaining, restartFrom, nil
 }
 
@@ -2453,12 +2476,16 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 }
 
 func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
-	return e.completeRunWithStatus(run, repo, types.RunCompleted)
+	status, err := e.terminalRunStatus(run)
+	if err != nil {
+		return err
+	}
+	return e.completeRunWithStatus(run, repo, status)
 }
 
 func (e *Executor) completeRunWithStatus(run *db.Run, repo *db.Repo, status types.RunStatus) error {
-	verifiedHead, verified := e.reconcileTerminalRunHead(run)
 	var err error
+	verifiedHead, verified := e.reconcileTerminalRunHead(run)
 	if verified {
 		err = e.db.UpdateRunStatusWithVerifiedHead(run.ID, status, verifiedHead)
 	} else {
@@ -2473,6 +2500,56 @@ func (e *Executor) completeRunWithStatus(run *db.Run, repo *db.Repo, status type
 	run.Status = status
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	return nil
+}
+
+// terminalRunStatus decides which success status a finished run records.
+//
+// A run whose CI step took the opt-in release path (ci.release_after_checks_pass)
+// did not merely complete: it reached its validation verdict and deliberately
+// stopped observing the PR, so it records checks_passed. That keeps the outcome
+// honest - a caller can tell "checks passed, waiting on a human merge decision"
+// apart from a run that ended because the PR merged or closed - and keeps it
+// stable, because the merge decision was never this run's to observe.
+//
+// The verdict is read from the durable marker the release path stamps when it
+// completes the CI step, not inferred from readiness. A run that only monitored
+// the PR also records readiness, and can end with an open PR after a timeout
+// gate is approved, so readiness alone would claim the opt-in verdict for a run
+// whose default behaviour never changed.
+func (e *Executor) terminalRunStatus(run *db.Run) (types.RunStatus, error) {
+	if run == nil {
+		return "", fmt.Errorf("cannot complete a nil run")
+	}
+	recorded, err := e.db.GetRun(run.ID)
+	if err != nil {
+		return "", fmt.Errorf("read run before recording terminal status: %w", err)
+	}
+	if recorded == nil {
+		return "", fmt.Errorf("cannot complete missing run %s", run.ID)
+	}
+	if recorded.CIReleasedAt == nil {
+		return types.RunCompleted, nil
+	}
+	prState := ""
+	if recorded.PRState != nil {
+		prState = strings.ToLower(strings.TrimSpace(*recorded.PRState))
+	}
+	if prState != "open" {
+		return types.RunCompleted, nil
+	}
+	steps, err := e.db.GetStepsByRun(recorded.ID)
+	if err != nil {
+		return "", fmt.Errorf("read steps before recording terminal status: %w", err)
+	}
+	for _, step := range steps {
+		if step.StepName != types.StepCI {
+			continue
+		}
+		if step.Status == types.StepStatusCompleted {
+			return types.RunChecksPassed, nil
+		}
+	}
+	return types.RunCompleted, nil
 }
 
 func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {
@@ -2555,9 +2632,9 @@ func (e *Executor) emitRunEvent(eventType ipc.EventType, run *db.Run, repo *db.R
 	// banner reads the reason off the delta (like PRURL) so it never needs a
 	// snapshot to distinguish it from a genuinely green run. Derived from step
 	// rows so both ActionApprove sites (live wait and Resume) are covered.
-	// Gated on the successful terminal status, not the event type: errorRun emits
+	// Gated on the terminal success statuses, not the event type: errorRun emits
 	// the same event for failed/cancelled runs, whose banner never reads it.
-	if run.Status == types.RunCompleted || run.Status == types.RunHandedOff {
+	if run.Status == types.RunCompleted || run.Status == types.RunChecksPassed || run.Status == types.RunHandedOff {
 		if steps, err := e.db.GetStepsByRun(run.ID); err == nil {
 			ciReason, testReason := completionOverrideReasons(steps)
 			if ciReason != "" {

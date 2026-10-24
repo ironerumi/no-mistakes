@@ -216,6 +216,9 @@ Run the pipeline and decide on its findings as they come up:
 
    # continue static review when coverage is incomplete and findings are empty
    no-mistakes axi respond --step review --action complete-coverage
+
+   # reject this gate (only when the user has decided it must fail)
+   no-mistakes axi respond --action abort --reason "<why the gate is rejected>"
    ```
    `complete-coverage` runs a fresh reviewer over only the missing paths.
    It reuses stored coverage only for the same run, step, round, head, base, and trusted scope.
@@ -252,6 +255,10 @@ Run the pipeline and decide on its findings as they come up:
     - `--reason "the operator's explanation"` records an explicitly authorized Test exception with `--step test --action approve`.
       This does not grant approval authority; escalate ask-user findings as before.
       Without a reason, Test approval remains effective; an approval past a failing command, `no-go`, or `inconclusive` verdict is reported as an exception with no operator reason supplied.
+    - `--action abort --reason "<why>"` records the user's decision that the parked gate fails. The reason is required.
+      The round is recorded as declined, no fix round starts, nothing is approved, pushed or merged, and the run ends `failed` with the reason in the step and run errors. Saved commits, findings and evidence stay available, but the run's worktree is removed, so uncommitted edits in it are lost.
+      Follow the output's `branch_sync.next_action` to get the branch back. It is the user's call, never yours: do not send it to get past a finding, and it is not `axi abort`, which cancels the run instead.
+    - Prefer `--instructions-file PATH` and `--add-finding-file PATH` for text containing backticks, quotes, or newlines. Write the exact text to a file and pass its path, without shell substitution. Alternatively `--instructions -` or `--add-finding -` reads stdin until EOF, cancellation, or `--wait` expiry (only one stdin input per response). Each file flag is exclusive with its inline flag; empty or whitespace-only file/stdin input is rejected.
     - `--add-finding '<json>'` (with `--action fix`) folds a finding you
       spotted yourself - one the pipeline did not surface - into the fix round,
       as a JSON finding object. Use it for a problem you noticed that is not in
@@ -276,6 +283,11 @@ Run the pipeline and decide on its findings as they come up:
      monitoring the PR in the background while the monitor is active; use
      `no-mistakes axi handoff` to end green monitoring after handing
      the open PR to human reviewers, or let the configured idle timeout elapse.
+     Under the opt-in `ci.release_after_checks_pass` the run instead finishes at
+     the verdict: `run.status` is `checks_passed`, the run released its worktree,
+     and nothing is left watching the PR.
+     An update it needs later is a fresh `no-mistakes axi run` on the updated head;
+     this run will not rebase or re-push it.
    - `passed` - the pipeline completed under the requested steps, including any
      explicit per-run skips. This alone is not evidence that a PR was merged.
    - `passed-with-override` - the pipeline completed with an explicitly approved Test exception or CI failure.
@@ -338,9 +350,11 @@ The CI step deliberately keeps watching the PR after checks pass, so
 `axi run` returns `checks-passed` the moment checks are green (or a trusted
 `no_ci: true` declaration covers a zero-check repository) rather than
 blocking on the human merge. Never poll or re-run waiting for the merge yourself.
+That monitor is live by default; only the opt-in
+`ci.release_after_checks_pass` finishes the run at the verdict instead.
 Never treat "no CI checks reported" alone as green.
 
-Because that monitor stays live, a PR that falls behind the default branch or
+Because that monitor stays live by default, a PR that falls behind the default branch or
 hits a merge conflict after checks pass - commonly because another PR merged
 first - needs **no command from you**: never hand-rebase. When the CI monitor
 sees an actual conflict it **rebases onto the base, resolves it, revalidates from Review
@@ -357,7 +371,8 @@ exhausted - in which case recover with `no-mistakes rerun`, subject to the
 clean-head check above. An accepted
 rerun cancels the stale monitor and re-runs the full pipeline including a
 deterministic rebase step. Do **not** reach for
-`no-mistakes axi run` to refresh a still-active PR: after `checks-passed` it
+`no-mistakes axi run` to refresh a still-active PR: with the default
+monitor, after `checks-passed` it
 reattaches to the running monitor (HEAD unchanged) and returns its output
 without rebasing.
 

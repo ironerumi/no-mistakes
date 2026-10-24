@@ -220,17 +220,18 @@ Review gates include a `note` field reminding agents that `auto_fix.review` defa
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
 `--wait` defaults to 8m so an agent harness with a 10-minute tool cap gets a structured error instead of an unbounded hang. It bounds the active-run lookup, event-subscription acknowledgement, and subsequent run driving. Elapsed wait is not a pipeline failure and does not mean the daemon is dead: run `no-mistakes axi status` and reattach with `axi run`. A live daemon that is slow to answer a pre-drive `get_active_run` or `get_run` state read is retried after a health probe rather than reported as an I/O failure or mistaken for an absent run.
 Backgrounding a call is fine for an agent harness, but the run never advances past a gate on its own.
-When the CI step is still monitoring an open PR and checks are green - or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge. A generic empty check list without that declaration is not ready.
-Treat that as the agent stopping point: ask the user to review and merge the PR from the `help` line, or run [`axi handoff`](#no-mistakes-axi-handoff) to end green monitoring without cancelling the run.
+When CI readiness is established - every registered check is green, or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - and known mergeability is clear, `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge. A generic empty check list without that declaration is not ready.
+Treat that outcome as the agent stopping point: ask the user to review and merge the PR from the `help` line, or run [`axi handoff`](#no-mistakes-axi-handoff) to end green monitoring without cancelling the run.
 `axi handoff` records `handed_off` only for an actively monitored open PR with persisted readiness; the PR remains open and is not treated as merged.
-If that PR later falls behind the default branch or hits a merge conflict, do not run `axi run`, `rerun`, or a manual rebase while the CI monitor is still running.
-The monitor auto-rebases onto the base, resolves actual conflicts, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push; a PR that is merely behind but clean needs no command.
+By default the run stays active and keeps monitoring the same PR.
+While that monitor is running, do not run `axi run`, `rerun`, or a manual rebase: the monitor auto-rebases onto the base, resolves actual conflicts, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push, while a PR that is merely behind but clean needs no command.
 On GitHub, a clean PR whose base requires up-to-date branches (`mergeStateStatus: BEHIND`) still reports `checks-passed` and waits for a human to bring it up to date, unless the repository opts into [`ci.rebase_behind`](/no-mistakes/reference/repo-config/#cirebase_behind), in which case it is rebased the same way.
 After that monitor ends, see [`no-mistakes rerun`](#no-mistakes-rerun) for the restart conditions; an explicit handoff is terminal and does not request a rerun.
+Under [`ci.release_after_checks_pass`](/no-mistakes/reference/repo-config/#cirelease_after_checks_pass) the run finishes at that verdict instead: `run.status` is `checks_passed`, it releases its worktree and its lane, and nothing is left monitoring the PR, so a later update is a fresh `axi run` on the updated head - this run will not rebase or re-push it.
 Successful outcomes (`checks-passed`, `passed`, `passed-with-override`, `passed-with-skips`, and `handed-off`) also carry `help` instructions telling the agent to summarize the run.
-`passed-with-override` is a completed run with an explicitly approved Test exception or a CI approval over still-failing checks.
-It stays a success but is distinct from a clean `passed`.
-A Test exception is an approval past a failing configured `commands.test`, a `no-go` verdict, an `inconclusive` verdict, or a [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout) budget cut; approving a `no-surface` park records its reason but completes as `passed`.
+`passed-with-override` qualifies either `passed` or `checks-passed` when the run has an explicitly approved Test exception or a CI approval over still-failing checks.
+It stays a success, including at the checks-passed stopping point, but does not claim a clean validation.
+A Test exception is an approval past a failing configured `commands.test`, a `no-go` verdict, an `inconclusive` verdict, or a [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout) budget cut; approving a `no-surface` park records its reason without adding the override qualification.
 `run.test_override_reason` preserves the Test exception explanation in drive and status output, including at the `checks-passed` stopping point; CI overrides retain their separate reason.
 Report those exceptions rather than describing Test as clean.
 `passed-with-skips` is a completed run where PR publication or CI verification automatically skipped because its provider was unavailable, or CI had no PR URL.
@@ -280,32 +281,41 @@ no-mistakes axi respond --action approve
 no-mistakes axi respond --action fix --findings F1,F2 --instructions "optional guidance"
 no-mistakes axi respond --action fix --findings F1,F2 --ignore F3
 no-mistakes axi respond --action fix --add-finding '{"description":"...","action":"auto-fix"}'
+no-mistakes axi respond --action fix --findings F1 --instructions-file ./guidance.md
+no-mistakes axi respond --action fix --add-finding-file ./finding.json
 no-mistakes axi respond --action skip
 no-mistakes axi respond --step review --action complete-coverage
+no-mistakes axi respond --action abort --reason "why the gate is rejected"
 no-mistakes axi respond --run <id> --action approve
 ```
 
 | Flag             | Type     | Default       | Description                                                          |
 | ---------------- | -------- | ------------- | -------------------------------------------------------------------- |
-| `--action`       | `string` | (none)        | `approve`, `fix`, `skip`, or `complete-coverage`; required. A reviewer's open question is answered with [`axi answer`](#no-mistakes-axi-answer), not here |
+| `--action`       | `string` | (none)        | `approve`, `fix`, `skip`, `complete-coverage`, or `abort`; required. A reviewer's open question is answered with [`axi answer`](#no-mistakes-axi-answer), not here |
 | `--run`          | `string` | current-branch active run | Answer the gate of this run ID from any directory, without resolving the current branch or worktree |
 | `--step`         | `string` | awaiting step | Step to respond to                                                   |
 | `--findings`     | `string` | (none)        | Comma-separated finding IDs to fix with `--action fix`               |
 | `--ignore`       | `string` | (none)        | Comma-separated finding IDs to decline with `--action fix`; see the accounting rules below |
-| `--instructions` | `string` | (none)        | Guidance applied to selected findings with `--action fix`            |
-| `--reason`       | `string` | (none)        | Operator's exception explanation for Test approval only              |
-| `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
+| `--instructions` | `string` | (none)        | Fix guidance; `-` reads stdin until EOF, cancellation, or `--wait`; exclusive with `--instructions-file` |
+| `--instructions-file` | `string` | (none) | Read fix guidance from a file; exclusive with `--instructions` |
+| `--reason`       | `string` | (none)        | Operator's reason: optional exception explanation for a Test approval, required with `--action abort` |
+| `--add-finding`  | `string` | (none)        | JSON finding object to add and fix; `-` reads stdin until EOF, cancellation, or `--wait`; exclusive with `--add-finding-file` |
+| `--add-finding-file` | `string` | (none) | Read JSON finding object from a file; exclusive with `--add-finding` |
 | `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve subsequent eligible gates until a decision point or outcome |
 | `--wait`         | `duration` | `8m`        | Maximum time for pre-drive reads and post-response driving before the caller must reattach |
+
+Prefer the file flags for text containing backticks, quotes, or newlines: they bypass shell expansion and preserve the input bytes through the response, including trailing newlines. File paths are relative to the caller's working directory and literal (a file named `-` is not stdin). Only the inline form with value `-` reads stdin; at most one input can read stdin per response, and the command stops waiting for it on EOF, cancellation, or `--wait` expiry. Each file/stdin input must be nonempty, not whitespace-only, and valid UTF-8; files must be regular and readable. The file/stdin readers reuse the bounded intent transport (49,122 bytes). The complete encoded request, including JSON escaping, guidance repeated for selected findings, and the newline delimiter, must fit the 1 MiB IPC frame limit; larger requests are refused before sending with their encoded size and limit. Inline text other than `-` retains its existing behavior. Both file flags require `--action fix`.
 
 Declines are explicit. With `--action fix`, every finding the gate shows must appear in `--findings` or `--ignore`; a response that leaves one out is refused with the unaccounted IDs named and the gate stays parked, so a partial selection can never silently decline the findings it omitted. An ID in both lists, or an ID the gate does not show, is refused the same way. A finding a previous response for the same step already decided may be omitted to keep that decision, including when recovery parks the same round again. Naming a finding previously chosen to fix in `--ignore` is refused too, because reverting an applied fix is out of scope for a gate response. The validation fails closed on the state it reads: if the gate's findings or this step's earlier decisions cannot be read, the response is refused, the gate stays parked, and the refusal names what could not be read. See [Finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history) for how these decisions are stored and carried into later rounds.
 
 Finding IDs are trimmed before validation. Missing or repeated gate finding IDs receive fresh IDs before the gate is shown, so each ID selects only one finding. An added finding with no ID, or an ID that collides with any gate finding, receives a fresh ID. Ignored findings and selections already recorded for a recovered round also reserve their IDs. See [Finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history) for how a fix response restores acknowledged work after recovery.
 
+A user-authored addition that collides with existing finding content is retained instead of being silently dropped. A matching non-user `no-op` can be replaced by the user record; collisions with blocking or other user-authored records keep both records. Its normalized ID, action, and instructions stay attached to the record sent to the fixer.
+
 Every successful fix response echoes what it recorded in a `recorded:` object: `fixed` (the findings selected, including `--add-finding` items under their normalized IDs), `ignored` (the findings explicitly declined), and `kept` (the gate findings omitted that a previous response for this step had already decided). A finding the restored decision dispatched is reported under `fixed`, not also under `kept`. Approve, skip, and abort emit no disposition echo. They are not decision-free: a nonempty gate they resolve is recorded as a decline round, which is what later rounds read as `user_chose_to_ignore`. `--yes` resolution is unchanged: it selects every current finding.
 
 `--action complete-coverage` continues a Review gate under the [coverage continuation rules](/no-mistakes/reference/pipeline-steps/#coverage-continuation).
-It refuses `--yes`, `--findings`, `--ignore`, `--instructions`, `--add-finding`, and `--reason`.
+It refuses `--yes`, `--findings`, `--ignore`, `--instructions`, `--instructions-file`, `--add-finding`, `--add-finding-file`, and `--reason`.
 The CLI supplies the observed head, step result, and latest round binding automatically.
 
 For an explicitly authorized Test exception, use `no-mistakes axi respond --step test --action approve --reason "the operator's explanation"`.
@@ -314,6 +324,16 @@ The step retains its findings and exit code, and the reason is durable local evi
 Revalidation, a new fix round, or skipping the step clears that current-step approval so a later result cannot inherit it.
 This is separate from the configured-command waiver and trusted repository opt-in used by [PR enforcement](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation); neither that policy nor approval authority changes.
 `--instructions` remains fix guidance, not an approval-reason input.
+
+`--action abort` rejects the parked gate and is the same gate-level abort the executor already has, now reachable from the agent surface.
+It requires `--reason`, so a rejection is never recorded without the operator's explanation.
+The gate's round is recorded as declined, the step fails with `aborted by user: <reason>`, and the run ends `failed` with that text in its error, so the reason is durable in the run and step records and shown by `axi status`.
+No fix round starts, and nothing is approved, skipped, pushed, or merged. Saved commits, findings, and evidence stay available, but the failed run removes its run worktree, so uncommitted edits in it (for example a refused protected-path edit) are lost: save anything you need before aborting.
+The output leads with a `rejected:` object naming the `run`, `step`, and `reason`, followed by the terminal run object and its `branch_sync` object; follow that object's `next_action` to return branch custody through the supported recovery path.
+It is refused, with nothing recorded, when the ID names no run, when the run is not parked at a gate, or when `--step` names a step other than the parked one.
+This is a human decision, not a way around a finding.
+It is not [`axi abort`](#no-mistakes-axi-abort), which cancels the active run wherever it is and records the run as `cancelled`.
+A running daemon older than this CLI only ever accepted a reason for a Test approval, so it refuses the abort reason and nothing is recorded; the CLI reports that the daemon is too old, and tells you to run `no-mistakes daemon restart` first and read its refusal, which lists every active run in every repository that a restart would interrupt (`daemon status` only reports whether the daemon is running, and `no-mistakes runs` lists only the current repository). The parked gate's own run is one of those active runs, so once you accept interrupting them, restart with `no-mistakes daemon restart --force` and send the abort again.
 
 Without `--run`, the response goes to the active run on the current branch, and `no active run to respond to` is the error when it has none. With `--run <id>`, the response goes to exactly that run, from any directory and without resolving a repository, branch, or worktree; every other flag behaves as it does in context. The call is refused with a nonzero exit when the ID names no run (`no run with id <id>`) or the run is not parked at a gate (`run <id> is not parked at a gate`), and it never answers a different run. [`axi status --run`](#no-mistakes-axi-status) stays inspection-only for bare commands and names `axi respond --run <id>` as the response command. An empty or whitespace-only `--run` value is refused with a nonzero exit and never selects the current branch's run. Every follow-up command a `--run` call prints carries `--run <id>`; a command with no `--run` form (`axi answer`, `axi run`, `axi sync`, `rerun`) is named as one that must run in the clone of that run.
 
@@ -727,6 +747,8 @@ no-mistakes stats
 ```
 
 Displays total changes, rescued changes, rescue rate, reported and fixed mistakes, fixes by pipeline step, and the top repos by rescue activity.
+
+Runs with [quota-aware routing](/no-mistakes/reference/global-config/#quota_routing) records also show the chosen agent order, candidate evidence, routing reason, and recorded mid-run switches. `--run <id>` limits that output to one run.
 
 Use `--agents` for local, per-purpose agent performance aggregates: duration and the subprocess-vs-model time split, session mode, errors, the token totals (input, output, cache-read, cache-creation, fresh input, reasoning), and the model round-trip and tool-category activity histogram, with a `METRICS` coverage count that tells a real zero apart from missing instrumentation.
 Use `--run <id>` to inspect the individual agent invocations for one run - including each invocation's per-round token deltas next to the adapter counters, tool-category breakdown, workload size, finding count, and fallback reason - plus the total time parked at approval gates; it implies `--agents`.

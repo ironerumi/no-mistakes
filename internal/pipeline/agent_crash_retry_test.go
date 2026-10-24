@@ -642,3 +642,48 @@ func TestExecutor_AgentCrashRetryHang(t *testing.T) {
 		})
 	}
 }
+
+// A repository that only tightens review.agent_timeout configured a budget for
+// Review alone: a Review budget cut is a deliberate stop and is not retried,
+// while Document, Lint, and Test keep the retry their untouched budgets earn.
+func TestExecutor_AgentCrashRetryRepoReviewTimeoutScopedToReview(t *testing.T) {
+	for _, stepName := range []types.StepName{types.StepReview, types.StepDocument, types.StepLint, types.StepTest} {
+		t.Run(string(stepName), func(t *testing.T) {
+			t.Parallel()
+			database, p, _, repo := setupTest(t)
+			work := t.TempDir()
+			initGitRepo(t, work)
+			head, err := git.HeadSHA(context.Background(), work)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := database.InsertRun(repo.ID, "hang", head, head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			ag := &hangingAgent{name: "hang", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+				calls++
+				if calls == 1 {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				return &agent.Result{}, nil
+			}}
+			step := &adaptiveCallStep{name: stepName, fn: func(sctx *StepContext) (*StepOutcome, error) {
+				_, err := sctx.RunAgent(agent.RunOpts{})
+				return &StepOutcome{}, err
+			}}
+			cfg := &config.Config{AgentCrashRetries: 1, AgentTimeout: time.Second, ReviewAgentTimeoutTightened: true}
+			if !cfg.AgentTimeoutConfiguredFor(types.StepReview) || cfg.AgentTimeoutConfiguredFor(types.StepDocument) {
+				t.Fatalf("a tightened review timeout must be configured for Review only")
+			}
+			executor := NewExecutor(database, p, cfg, ag, []Step{step}, nil)
+			err = executor.Execute(context.Background(), run, repo, work)
+			wantRetry := stepName != types.StepReview
+			if (err == nil) != wantRetry || calls != 1+boolInt(wantRetry) {
+				t.Fatalf("calls=%d err=%v, want retry=%t", calls, err, wantRetry)
+			}
+		})
+	}
+}

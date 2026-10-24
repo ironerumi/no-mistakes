@@ -1,5 +1,60 @@
 # Changelog
 
+## [1.100.2](https://github.com/kunchenguid/no-mistakes/compare/v1.100.1...v1.100.2) (2026-10-24)
+
+
+### Bug Fixes
+
+* **agent:** report evidence on blank Claude exit and keep finished results ([#1566](https://github.com/kunchenguid/no-mistakes/issues/1566)) ([764432a](https://github.com/kunchenguid/no-mistakes/commit/764432a3a1f688e093bee86c519e052b426ed3df))
+* **daemon:** scope Windows logon task trigger to the installing user ([#1578](https://github.com/kunchenguid/no-mistakes/issues/1578)) ([9b0da79](https://github.com/kunchenguid/no-mistakes/commit/9b0da79e98475642b63fdc81e698e826e8fd2659))
+* **pipeline:** fit fix-agent commit summaries to the subject budget ([#1574](https://github.com/kunchenguid/no-mistakes/issues/1574)) ([69143e7](https://github.com/kunchenguid/no-mistakes/commit/69143e74d877e284321d5edcd224f02dc57a4f90))
+
+## [1.100.1](https://github.com/kunchenguid/no-mistakes/compare/v1.100.0...v1.100.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* **pipeline:** apply commit settings to a fix agent's own commits ([#1472](https://github.com/kunchenguid/no-mistakes/issues/1472)) ([fb278c2](https://github.com/kunchenguid/no-mistakes/commit/fb278c27db66bbabc5db3e308e6a9c33a4bbb66f))
+* **shellenv:** accept a clean childless Windows exit in the child-completion check ([#1541](https://github.com/kunchenguid/no-mistakes/issues/1541)) ([cc062e8](https://github.com/kunchenguid/no-mistakes/commit/cc062e897cd2db842b238aacc640d0731daeb6d5))
+
+## [1.100.0](https://github.com/kunchenguid/no-mistakes/compare/v1.99.1...v1.100.0) (2026-10-21)
+
+
+### Features
+
+* **cli:** expose the gate-level abort through axi respond ([#1478](https://github.com/kunchenguid/no-mistakes/issues/1478)) ([1cb1e7d](https://github.com/kunchenguid/no-mistakes/commit/1cb1e7dfa067babbf3afbbe054da38863e615eb7))
+* **config:** add trusted repository-level review.agent_timeout ([#1540](https://github.com/kunchenguid/no-mistakes/issues/1540)) ([aeba928](https://github.com/kunchenguid/no-mistakes/commit/aeba928caba574a7bef2dd311699936b0b3ef71b))
+
+
+### Bug Fixes
+
+* **pipeline:** keep fixer edits when a verification tool is missing ([#1539](https://github.com/kunchenguid/no-mistakes/issues/1539)) ([ea987ab](https://github.com/kunchenguid/no-mistakes/commit/ea987abe5922c10309efbc9111b559f2143c2779))
+* **scm/gitea:** match CI runs to the PR by number or source branch ([#1537](https://github.com/kunchenguid/no-mistakes/issues/1537)) ([7703126](https://github.com/kunchenguid/no-mistakes/commit/77031262be56388250b2b51b67bef24811204c1e))
+
+## [1.99.1](https://github.com/kunchenguid/no-mistakes/compare/v1.99.0...v1.99.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **pipeline:** repair merge conflicts against newer base commits ([#1547](https://github.com/kunchenguid/no-mistakes/issues/1547)) ([97f800e](https://github.com/kunchenguid/no-mistakes/commit/97f800ef40b60ff6a7efc35ca36d87cf862be312))
+* **pr:** resolve the GitHub token once per PR media render ([#1545](https://github.com/kunchenguid/no-mistakes/issues/1545)) ([1689ea2](https://github.com/kunchenguid/no-mistakes/commit/1689ea2558072e0d21a23fd9a0aebd6daefc3e8f))
+* **scm/gitlab:** treat a blocking manual job as a wait, not a skip ([#1526](https://github.com/kunchenguid/no-mistakes/issues/1526)) ([bd48db5](https://github.com/kunchenguid/no-mistakes/commit/bd48db525f62911935daf57e70277278bbccdac2))
+
+## [1.99.0](https://github.com/kunchenguid/no-mistakes/compare/v1.98.0...v1.99.0) (2026-10-18)
+
+
+### Features
+
+* add opt-in quota-aware agent routing ([#1530](https://github.com/kunchenguid/no-mistakes/issues/1530)) ([3991662](https://github.com/kunchenguid/no-mistakes/commit/3991662a3eb0bb00eeca0980f9723b4ff0a5ad16))
+* **agent:** add OpenCode v2 session-based adapter ([#1521](https://github.com/kunchenguid/no-mistakes/issues/1521)) ([d228adb](https://github.com/kunchenguid/no-mistakes/commit/d228adbdddb1ddbb9e5bdc45423b646716b0b1ad))
+* **pipeline:** add opt-in retries for crashed agent steps ([#1520](https://github.com/kunchenguid/no-mistakes/issues/1520)) ([5872783](https://github.com/kunchenguid/no-mistakes/commit/58727831845fb73d15dd36d6389a6397b72009b5))
+* **pipeline:** make finishing runs at checks-passed opt-in ([#1387](https://github.com/kunchenguid/no-mistakes/issues/1387)) ([42d7c79](https://github.com/kunchenguid/no-mistakes/commit/42d7c79d6e70840e93717c0f3582df3580922f34))
+
+
+### Bug Fixes
+
+* **scm/gitlab:** read the head pipeline's aggregate, trigger jobs, and external status checks ([#1525](https://github.com/kunchenguid/no-mistakes/issues/1525)) ([c7692c1](https://github.com/kunchenguid/no-mistakes/commit/c7692c1cb3a4ab58255c889b21c8e4a46e3a4913))
+
 ## [1.98.0](https://github.com/kunchenguid/no-mistakes/compare/v1.97.2...v1.98.0) (2026-10-17)
 
 

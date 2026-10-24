@@ -95,7 +95,6 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	issueDesc := targets.description()
 	sctx.Log(fmt.Sprintf("repairing: %s...", issueDesc))
 	previousHeadSHA := sctx.Run.HeadSHA
-	fixKey := encodeLastFixedChecks(targets.Checks, targets.MergeConflict)
 	fixCompletedAt := completionTimesForTargets(s.observedCompletedAt, targets.Checks)
 	repair, err := s.autoFixCI(sctx, host, pr, targets)
 	if outcome := pipeline.ProtectedPathOutcome(err); outcome != nil {
@@ -126,7 +125,7 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 		return nil, nil
 	}
 	if repair.HeadAdvanced || sctx.Run.HeadSHA != previousHeadSHA {
-		s.lastFixedChecks = fixKey
+		s.lastFixedChecks = encodeLastFixedChecks(targets.Checks, targets.MergeConflict, repair.ConflictBaseSHA)
 		s.lastFixedCompletedAt = fixCompletedAt
 		s.pendingFixSummary = repair.Summary
 		s.pendingRepairPublish = true
@@ -185,7 +184,7 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	if err != nil {
 		return ciRepairResult{}, err
 	}
-	rebaseBaseSHA := resolveRunDefaultBranchTipSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
+	rebaseBaseSHA, rebaseBaseResolved := resolveRunDefaultBranchTip(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
 	promptBaseSHA := baseSHA
 	if rebase {
 		promptBaseSHA = rebaseBaseSHA
@@ -288,6 +287,9 @@ CI logs:
 		defer func() { s.replayBase = "" }()
 	}
 	repair, err := s.commitRepair(sctx, conclusion.Summary, result)
+	if mergeConflict && rebaseBaseResolved {
+		repair.ConflictBaseSHA = rebaseBaseSHA
+	}
 	var refusal *pipeline.ProtectedPathError
 	if errors.As(err, &refusal) {
 		head, recordErr := stepGitHeadSHA(sctx)
@@ -576,6 +578,7 @@ type ciRepairResult struct {
 	// ReviewCarried is true when a revalidating repair kept the run's review
 	// approval as a proven pure replay, so revalidation starts at Test.
 	ReviewCarried      bool
+	ConflictBaseSHA    string
 	NoCodeChangeNeeded bool
 	Summary            string
 }
@@ -613,6 +616,24 @@ func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairR
 }
 
 func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, producer *agent.Result) (ciRepairResult, error) {
+	render := func() (string, error) {
+		repairSummary := summary
+		if repairSummary == "" {
+			repairSummary = "repair failing checks"
+		}
+		message, err := sctx.Config.Commit.RenderFixMessageForBranch(types.StepCI, repairSummary, sctx.Run.Branch)
+		if err != nil {
+			return "", fmt.Errorf("render CI repair commit message: %w", err)
+		}
+		message, err = withCommitTrailers(sctx, message, producer)
+		if err != nil {
+			return "", fmt.Errorf("render CI repair commit trailers: %w", err)
+		}
+		return message, nil
+	}
+	if err := conformAgentCommits(sctx, types.StepCI, render); err != nil {
+		return ciRepairResult{}, err
+	}
 	status, err := stepGitRun(sctx, "status", "--porcelain")
 	if err != nil {
 		return ciRepairResult{}, fmt.Errorf("check CI changes: %w", err)
@@ -626,16 +647,9 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, produc
 		return ciRepairResult{}, nil
 	}
 
-	if summary == "" {
-		summary = "repair failing checks"
-	}
-	message, err := sctx.Config.Commit.RenderFixMessageForBranch(types.StepCI, summary, sctx.Run.Branch)
+	message, err := render()
 	if err != nil {
-		return ciRepairResult{}, fmt.Errorf("render CI repair commit message: %w", err)
-	}
-	message, err = withCommitTrailers(sctx, message, producer)
-	if err != nil {
-		return ciRepairResult{}, fmt.Errorf("render CI repair commit trailers: %w", err)
+		return ciRepairResult{}, err
 	}
 	if err := stagePipelineChanges(sctx); err != nil {
 		return ciRepairResult{}, fmt.Errorf("stage CI changes: %w", err)
