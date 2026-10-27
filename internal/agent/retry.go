@@ -217,12 +217,6 @@ var transientNeedles = []struct {
 	// parse-specific strings are added.
 	{"invalid character '<' after top-level value", "provider protocol residue after JSON"},
 	{"split bare json objects could not be fused into one valid object", "unfused split bare JSON objects"},
-	// Pi ending its turn without calling the strict output tool alone is
-	// stochastic; the step's work is usually done and a cold retry succeeds.
-	{"did not finish by calling no_mistakes_output alone", "pi output tool not called alone"},
-	// Provider/network blips surfaced by Pi as bare messages.
-	{"fetch failed", "fetch failed"},
-	{"unable to verify model access", "model access verification failed"},
 }
 
 var terminalNeedles = []struct {
