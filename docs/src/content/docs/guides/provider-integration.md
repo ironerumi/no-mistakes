@@ -83,7 +83,7 @@ If one daemon serves repositories that require non-overlapping accounts, give ea
 - PR creation and update on pushes
 - CI polling follows the [CI step lifecycle](/no-mistakes/reference/pipeline-steps/#ci)
 - Failed job log fetching (`gh run view --log-failed`) for the CI auto-fix step
-- A red Greptile check parked as `ask-user` CI findings carrying its unresolved review-thread comments, which are also supplied to CI repair prompts (a green or not-yet-registered one too under [`ci.review_bot_comments: always`](/no-mistakes/reference/repo-config/#cireview_bot_comments)); see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for filtering and prompt-safety details
+- A red Greptile check, or a CodeRabbit check opted in through [`ci.required_reviews`](/no-mistakes/reference/repo-config/#cirequired_reviews), parked as `ask-user` CI findings carrying its unresolved review-thread comments, which are also supplied to CI repair prompts (a green or not-yet-registered one too under [`ci.review_bot_comments: always`](/no-mistakes/reference/repo-config/#cireview_bot_comments)); see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for filtering and prompt-safety details
 - PR mergeability polling, and agent-driven resolution when the provider reports an actual merge conflict
 
 ### GitHub fork contributions
@@ -319,6 +319,8 @@ The fork owner extracted from the fork URL keeps the plain `owner/name` form bec
 Self-hosted GitLab is detected out of the box even when the hostname carries no `gitlab` marker (for example `git.example.com`).
 When the hostname is not obviously GitLab, `no-mistakes` consults glab's configured hosts (`config.yml`, honoring `GLAB_CONFIG_DIR` then `XDG_CONFIG_HOME/glab-cli`, then `~/.config/glab-cli`) and treats the upstream as GitLab if its host appears there as a configured host or `api_host`.
 Running `glab auth login --hostname your-gitlab.example.com` is enough to make detection succeed; if glab is not configured for the host, detection fails closed and the upstream is treated as unsupported.
+
+If GitLab serves SSH and web/API traffic on different hosts, configure glab's global `api_host` for the Git remote's host. See the [MR URL validation contract](/no-mistakes/reference/pipeline-steps/#pr) for how existing-MR discovery and review-comment reads authorize the alternate web host.
 
 The GitLab backend is pinned against `glab v1.5x`. Self-hosted detection and the merge-request and CI steps rely on its current flag and API surface, so keep `glab` reasonably up to date.
 

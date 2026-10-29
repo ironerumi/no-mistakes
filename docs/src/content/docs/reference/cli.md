@@ -66,6 +66,9 @@ When a fork URL is already recorded, re-running `init` without `--fork-url` pres
 Passing `--fork-url` again replaces the stored fork URL after validation.
 If you rename or move an initialized working directory and the old path no longer exists, re-running `init` from the new path reattaches the existing gate, preserves the repo ID and run history, and updates the stored working path.
 If you copy an initialized working directory while the original still exists, the copy is treated as a separate repo and gets a fresh gate.
+On a fresh init and on a refresh alike, `init` decides from the literal `no-mistakes` remote URL in `.git/config`, before any `url.<base>.insteadOf` rewrite: it repoints stale wiring into its own `repos` directory, leaves alone a URL that your git config already rewrites to this gate for both fetch and push, and refuses anything else, including a remote with several URLs, rather than rewriting it.
+When the checkout's `.git` is shared with another no-mistakes home (another `NM_HOME`, for example a linked worktree used by another OS account), that remote names the other home's gate, so the refusal names both gates and prints the per-account rewrite `git config --global 'url.<this gate>.insteadOf' '<other gate>'`, with both paths shell-quoted so it can be pasted as is.
+With that rewrite in your own global git config, `init` leaves the shared remote alone and your pushes through it reach your own gate; a rolled-back init or an `eject` from your home leaves it in place too.
 Fresh init rolls back gate setup when a required gate or daemon step fails; refresh does not eject a pre-existing gate if daemon startup fails.
 Skill installation is best-effort: if the skill write fails, init reports it and leaves the working gate in place.
 
@@ -85,7 +88,7 @@ no-mistakes ci-workflow --force
 Run it from anywhere inside a repository with a `.no-mistakes.yaml`; the config is read from and the workflow written at the git toplevel, and `commands.test` must be configured or the command errors.
 The generated workflow runs the configured test command (and lint command when `commands.lint` is set; with an empty `commands.lint` it emits a test-only workflow, since lint runs as the combined document+lint agent pass) on push to the repository's default branch, resolved from the `origin` remote and falling back to `main`, and on all pull requests.
 Commands are inserted verbatim into YAML block scalars, with multi-line commands indented to stay inside the scalar.
-The template is Go-focused (it uses `actions/setup-go` with `go-version-file: go.mod`); non-Go repos can adapt the generated file.
+Both the lint+test and test-only templates include `actions/setup-go` with `go-version-file: go.mod` only when a `go.mod` file exists at the repository root when generating the workflow; a nested module alone does not enable it. Without a root `go.mod`, Go setup is omitted. Add any other language or toolchain setup your commands require to the generated file.
 An existing `.github/workflows/ci.yml` is never overwritten without `--force`, overwrites are atomic, and the command refuses to write through a symlinked `.github`, `workflows`, or `ci.yml`.
 Commit and push the generated file to enable the checks.
 
@@ -296,10 +299,10 @@ no-mistakes axi respond --run <id> --action approve
 | `--step`         | `string` | awaiting step | Step to respond to                                                   |
 | `--findings`     | `string` | (none)        | Comma-separated finding IDs to fix with `--action fix`               |
 | `--ignore`       | `string` | (none)        | Comma-separated finding IDs to decline with `--action fix`; see the accounting rules below |
-| `--instructions` | `string` | (none)        | Fix guidance; `-` reads stdin until EOF, cancellation, or `--wait`; exclusive with `--instructions-file` |
-| `--instructions-file` | `string` | (none) | Read fix guidance from a file; exclusive with `--instructions` |
+| `--instructions` | `string` | (none)        | Driver fix guidance applied to selected findings with `--action fix`; recorded as `driver_instructions`, never as the user's decision; `-` reads stdin until EOF, cancellation, or `--wait`; exclusive with `--instructions-file` |
+| `--instructions-file` | `string` | (none) | Read driver fix guidance from a file; exclusive with `--instructions` |
 | `--reason`       | `string` | (none)        | Operator's reason: optional exception explanation for a Test approval, required with `--action abort` |
-| `--add-finding`  | `string` | (none)        | JSON finding object to add and fix; `-` reads stdin until EOF, cancellation, or `--wait`; exclusive with `--add-finding-file` |
+| `--add-finding`  | `string` | (none)        | JSON finding object to add and fix; a `driver_instructions` key is refused, since driver guidance comes only from `--instructions`; `-` reads stdin until EOF, cancellation, or `--wait`; exclusive with `--add-finding-file` |
 | `--add-finding-file` | `string` | (none) | Read JSON finding object from a file; exclusive with `--add-finding` |
 | `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve subsequent eligible gates until a decision point or outcome |
 | `--wait`         | `duration` | `8m`        | Maximum time for pre-drive reads and post-response driving before the caller must reattach |
@@ -324,6 +327,7 @@ The step retains its findings and exit code, and the reason is durable local evi
 Revalidation, a new fix round, or skipping the step clears that current-step approval so a later result cannot inherit it.
 This is separate from the configured-command waiver and trusted repository opt-in used by [PR enforcement](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation); neither that policy nor approval authority changes.
 `--instructions` remains fix guidance, not an approval-reason input.
+It is recorded as the driving agent's `driver_instructions`, apart from the TUI's per-finding user instructions: the step's own round history names it as driver guidance that scoped that fix round only, and the decision history carried to other steps and later runs never repeats it as the user's choice.
 
 `--action abort` rejects the parked gate and is the same gate-level abort the executor already has, now reachable from the agent surface.
 It requires `--reason`, so a rejection is never recorded without the operator's explanation.
@@ -587,6 +591,13 @@ The retry refuses, changing nothing, unless every proof holds:
 | `compatible configuration` | the run has no verification plan, its Pi profile still resolves to the same model and effort, and the repository's gates, read from the freshly fetched trusted default branch, are the gates the run pinned. A carried Review also needs the same effective repository configuration as the trusted commit its rounds recorded, the same global configuration when its rounds recorded one, and the same agent and model that served each carried step (an `auto` agent is resolved first). The configuration is checked twice: once before the launch, and again against the configuration the new run actually loads, so a change between the two refuses the retry. The refusal names the changed setting |
 | `review conversation` | a carried Review that recorded a question still has its question records on disk. They are copied into the new run, so open and withdrawn questions reach the PR body; if they are gone, the retry is refused |
 
+For the agent and model proof, configured reviewer fallbacks are eligible under
+the base or later-round role that served the invocation, including coverage turns.
+When an invocation recorded a configured model, that value must still match an
+eligible candidate, including its provider prefix. Removing or changing that
+candidate can therefore refuse the retry even when the reported model name is
+unchanged.
+
 Each refusal names the failed proof and points to `no-mistakes rerun`.
 The new run records which run, step, and round it continues, the failed step's error, and the preserved head it started from.
 Its run object shows that link as `retry_of`, and the failed run's run object names its continuation as `retried_by`; the new run's own outcome completes the trail.
@@ -607,7 +618,8 @@ Remove the gate from the current repository.
 no-mistakes eject
 ```
 
-Removes the `no-mistakes` remote, deletes the bare repo directory, cleans up worktrees, and deletes the database record (cascades to runs and steps).
+Removes the `no-mistakes` remote only when it has exactly one literal URL (as written in `.git/config`, before any `url.<base>.insteadOf` rewrite) inside this home's `repos` directory; any other remote, such as another no-mistakes home's gate in a shared `.git`, a remote you pointed elsewhere, or one with several URLs, is left in place.
+It deletes the bare repo directory, cleans up worktrees, and deletes the database record (cascades to runs and steps).
 It does not remove any legacy repo-local agent skill files left by older versions; current `init` installs the skill at user level instead.
 
 ## no-mistakes attach

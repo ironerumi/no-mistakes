@@ -70,6 +70,8 @@ type CIStep struct {
 	observedCompletedAt  map[string]checkFreshness // terminally failed check freshness at the observation whose findings a fix round may repair
 	pendingFixSummary    string                    // one-line summary of the repair this execution published, attached to the outcome it ends with
 	pendingRepairPublish bool
+	fixAgentCrashes      int
+	lastFixAgentCrash    string
 	transientReruns      checkRerunBudget // per-check rerun budget spent on provider-reported transient failures
 	pollIntervalOverride time.Duration    // if set, overrides computed poll interval (for testing)
 	waitForNextPoll      func(context.Context, time.Duration) error
@@ -188,20 +190,21 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	}
 }
 
-// VerifyApprovalOverride implements pipeline.ApprovalOverrideVerifier. It
-// re-polls the live checks once, synchronously, at the moment a human answers
-// ActionApprove on a CI gate raised by ciFailureOutcome, so an approval over
-// checks that are not genuinely all green can never be silently reported as a
-// plain "outcome=passed" - see the interface doc for the incident this exists
-// for. Resolution uses allChecksPassed - the same trusted all-green semantics
-// the CI step's own polling loop uses (see its allChecksPassed callsite) -
-// rather than the narrower !hasFailingChecks, because an empty check list or
-// a check still pending/cancelled/otherwise unresolved is not evidence of a
-// clean pass either; !hasFailingChecks previously treated all of those as
-// clean. Read-only: unlike Execute and ReconcileApprovalGate, it never fixes,
-// reruns, or pushes anything, and it never blocks the approval itself - it
-// only decides how the resulting completion is recorded.
-func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, error) {
+// VerifyApprovalOverride reads live checks without fixing or rerunning them.
+// Required reviews must be proven complete at the run's current head before
+// approval can use the ordinary CI override path. Any earlier return leaves
+// that proof absent, so the deferred guard refuses completion.
+func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (reason string, verifyErr error) {
+	requiredComplete := !requiresExternalReview(sctx)
+	defer func() {
+		if !requiredComplete {
+			if verifyErr != nil {
+				verifyErr = fmt.Errorf("%w: %w", pipeline.ErrApprovalBlocked, verifyErr)
+			} else {
+				verifyErr = fmt.Errorf("%w: %s", pipeline.ErrApprovalBlocked, reason)
+			}
+		}
+	}()
 	ctx := sctx.Ctx
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -234,7 +237,10 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 	// must never be recorded from another commit's checks. Review-bot identity
 	// comes from that same head read, exactly as the polling loop names it.
 	pr.HeadSHA = sctx.Run.HeadSHA
-	checks, err := host.GetChecks(ctx, pr)
+	checks, _, _, err := getCIChecks(ctx, host, pr)
+	if err == nil {
+		checks, err = requiredReviewChecks(sctx, host, pr, checks)
+	}
 	if err != nil {
 		if errors.Is(err, scm.ErrHeadChanged) {
 			// The provider answered; nothing it offered is evidence for the
@@ -245,6 +251,12 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		}
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
+	for _, check := range checks {
+		if check.ExternalReview != "" && check.Bucket != scm.CheckBucketPass {
+			return fmt.Sprintf("%s is %s at the current PR head", check.Name, check.State), nil
+		}
+	}
+	requiredComplete = true
 	if allChecksPassed(checks) {
 		// A green head can still carry a green review bot's unresolved
 		// comments under ci.review_bot_comments: always; approving over
@@ -306,6 +318,27 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	repairRequested := sctx.Fixing && !retryRefusal
 	defer func() {
 		if outcome != nil {
+			if s.fixAgentCrashes > 0 {
+				findings, parseErr := types.ParseFindingsJSON(outcome.Findings)
+				if outcome.Findings == "" || parseErr == nil {
+					// Deferred findings may already contain the previous round's
+					// diagnostic. Replace it with the latest cumulative count and cause.
+					items := findings.Items[:0]
+					for _, item := range findings.Items {
+						if item.ID != "ci-fix-agent-crashes" {
+							items = append(items, item)
+						}
+					}
+					findings.Items = items
+					findings.Items = append(findings.Items, Finding{
+						ID:          "ci-fix-agent-crashes",
+						Severity:    types.FindingSeverityInfo,
+						Action:      types.ActionNoOp,
+						Description: fmt.Sprintf("%d CI fix-agent crashes; last cause: %s", s.fixAgentCrashes, s.lastFixAgentCrash),
+					})
+					outcome.Findings, _ = types.MarshalFindingsJSON(findings)
+				}
+			}
 			if s.pendingFixSummary != "" {
 				outcome.FixSummary = s.pendingFixSummary
 			}
@@ -346,12 +379,18 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	provider := resolvedProvider(sctx)
 	host, skipReason := buildHost(sctx, provider)
 	if host == nil {
+		if requiresExternalReview(sctx) {
+			return ciCheckReadFailureOutcome(fmt.Errorf("required external review unavailable: %s", skipReason)), nil
+		}
 		sctx.Log(fmt.Sprintf("skipping CI: %s", skipReason))
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: skipReason}, nil
 	}
 	if err := host.Available(ctx); err != nil {
 		if pluginContractBroken(err) {
 			return nil, err
+		}
+		if requiresExternalReview(sctx) {
+			return ciCheckReadFailureOutcome(err), nil
 		}
 		sctx.Log(fmt.Sprintf("skipping CI: %v", err))
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: err.Error()}, nil
@@ -371,6 +410,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 	}
 	if prURL == "" {
+		if requiresExternalReview(sctx) {
+			return ciCheckReadFailureOutcome(fmt.Errorf("required external review has no PR URL")), nil
+		}
 		sctx.Log("no PR URL found, skipping CI")
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: "no PR URL found"}, nil
 	}
@@ -487,6 +529,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	behindBaseTip := ""
 	mergeabilityBlockedReason := ""
 	var timeoutFailingChecks []scm.CheckTarget
+	lastCheckHeadSHA := sctx.Run.HeadSHA
+	var timeoutExternalReviews []scm.Check
 	timeoutMergeConflict := false
 	lastMonitorLog := ciMonitorStatus{}
 	consecutiveCheckErrs := 0
@@ -505,6 +549,15 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			outcome = ciMergeabilityOutcome("mergeability check timed out", mergeabilityBlockedReason)
 		} else {
 			outcome = ciMonitoringTimeoutOutcome()
+		}
+		if len(timeoutExternalReviews) > 0 {
+			external := ciObservationFindings(ciIssues{requiredReviews: requiredReviews(sctx), checks: timeoutExternalReviews, failing: failingCheckNames(timeoutExternalReviews)})
+			if len(timeoutFailingChecks) > 0 || timeoutMergeConflict || mergeabilityBlockedReason != "" {
+				prior, _ := types.ParseFindingsJSON(outcome.Findings)
+				external.Items = append(prior.Items, external.Items...)
+				external.Summary = prior.Summary + "; " + external.Summary
+			}
+			outcome = ciObservationOutcome(external)
 		}
 		return ciTerminalRepairOutcome(outcome, Findings{}, sctx.DeferredFindings), nil
 	}
@@ -646,7 +699,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 
 		// Check CI status - wait for all checks to complete before escalating
 		pr.HeadSHA = sctx.Run.HeadSHA
-		checks, err := host.GetChecks(ctx, pr)
+		checks, observedHead, _, err := getCIChecks(ctx, host, pr)
+		if observedHead != "" && observedHead != lastCheckHeadSHA {
+			timeoutFailingChecks = nil
+			lastCheckHeadSHA = observedHead
+		}
+		if err == nil {
+			checks, err = requiredReviewChecks(sctx, host, pr, checks)
+		}
 		if err != nil && pluginPollFailsStep(err) {
 			if err := clearCIMonitorReady(sctx); err != nil {
 				return nil, err
@@ -666,6 +726,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				// the wait, and the readiness signal is cleared because the
 				// previous observation was for a different head.
 				consecutiveCheckErrs = 0
+				timeoutFailingChecks = nil
 				if err := logStatus(fmt.Sprintf("%s%v", cimonitor.ChecksHeadWaitingPrefix, err)); err != nil {
 					return nil, err
 				}
@@ -687,6 +748,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		} else {
 			consecutiveCheckErrs = 0
+			timeoutExternalReviews = nil
+			for _, check := range checks {
+				if check.ExternalReview != "" && check.Bucket != scm.CheckBucketPass {
+					check.Bucket = scm.CheckBucketFail
+					check.State += " (CI TIMEOUT)"
+					timeoutExternalReviews = append(timeoutExternalReviews, check)
+				}
+			}
 			// A failure the provider produced before the repository's own steps
 			// ran (a setup/action-resolution outage) is infrastructure, not a
 			// verdict on the code. Re-bucket those into the transient path before
@@ -785,6 +854,17 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			// stays the set the fix agent is asked to repair.
 			reportedIssues := mergeCheckNames(failing, unresolvedCancelled)
 			timeoutFailingChecks = terminalCheckTargetsForNames(checks, mergeCheckNames(reportedIssues, awaitingRerun))
+			// Synthetic review requirements are decisions, including at timeout;
+			// never hand their IDs to the generic job-repair outcome.
+			for _, check := range checks {
+				if check.ExternalReview != "" {
+					for i := len(timeoutFailingChecks) - 1; i >= 0; i-- {
+						if timeoutFailingChecks[i].ProviderID == check.ProviderID {
+							timeoutFailingChecks = append(timeoutFailingChecks[:i], timeoutFailingChecks[i+1:]...)
+						}
+					}
+				}
+			}
 
 			if hasIssues || len(awaitingRerun) > 0 {
 				if err := clearCIMonitorReadyForIssues(sctx); err != nil {
@@ -842,6 +922,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					s.observedCompletedAt = terminalFailureCompletionTimes(checks)
 					findings := ciObservationFindings(ciIssues{
 						provider:            host.Provider(),
+						requiredReviews:     requiredReviews(sctx),
 						checks:              checks,
 						failing:             failing,
 						unresolvedCancelled: unresolvedCancelled,
@@ -947,7 +1028,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 							return nil, err
 						}
 						sctx.DeferredFindings = ""
-						findings := ciObservationFindings(ciIssues{provider: host.Provider(), checks: checks, behindBase: true})
+						findings := ciObservationFindings(ciIssues{provider: host.Provider(), requiredReviews: requiredReviews(sctx), checks: checks, behindBase: true})
 						sctx.Log(fmt.Sprintf("issues detected: %s", findings.Summary))
 						return ciObservationOutcome(findings), nil
 					}

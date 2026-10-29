@@ -7,17 +7,22 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 var errCIAttestationUnsettled = errors.New("CI repair attestation is unsettled")
+
+var errCIFixAgentCrash = errors.New("CI fix agent crashed")
 
 // errAttestationWriteFailed marks a failure specifically inside
 // attestHeadBeforePush (PR discovery or the attestation write itself), as
@@ -76,21 +81,55 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 		sctx.Log("fix requested with no CI findings to repair, resuming monitoring...")
 		return nil, nil
 	}
-	if len(targets.Checks) > 0 && s.observedCompletedAt == nil {
+	var failingFindings Findings
+	for _, finding := range targets.Findings.Items {
+		if finding.Category == types.FindingCategoryCICheck {
+			failingFindings.Items = append(failingFindings.Items, finding)
+		}
+	}
+	failingTargets := ciFixTargetsFromFindings(failingFindings)
+	if len(failingTargets.Checks) > 0 {
 		expectedHeadSHA, err := stepGitHeadSHA(sctx)
 		if err != nil {
 			return nil, fmt.Errorf("resolve head before snapshotting selected CI checks: %w", err)
 		}
 		snapshotPR := *pr
 		snapshotPR.HeadSHA = expectedHeadSHA
-		checks, err := host.GetChecks(sctx.Ctx, &snapshotPR)
-		if err != nil {
+		checks, _, moved, err := getCIChecks(sctx.Ctx, host, &snapshotPR)
+		switch {
+		case moved && !pluginContractBroken(err):
+			sctx.Log("selected CI checks are stale; waiting for current checks before repair")
+			failingTargets.Checks = nil
+		case err != nil:
 			return nil, fmt.Errorf("snapshot selected CI checks before repair: %w", err)
+		default:
+			for _, target := range failingTargets.Checks {
+				// Only a fresh failure is repairable. A selected check that
+				// was re-run and then cancelled has no failure left for the
+				// fixer; cancellations go to the ask-user path instead.
+				if !checkTargetStillFailing(checks, target) {
+					sctx.Log("selected CI checks are missing or no longer failing; waiting for current CI observation")
+					failingTargets.Checks = nil
+					break
+				}
+			}
+			if len(failingTargets.Checks) > 0 {
+				s.observedCompletedAt = terminalFailureCompletionTimes(checks)
+			}
 		}
-		if snapshotPR.HeadSHA != expectedHeadSHA {
-			return nil, fmt.Errorf("snapshot selected CI checks before repair: %w", scm.ErrHeadChanged)
+		if len(failingTargets.Checks) == 0 {
+			remaining := types.FindingsMetadata(targets.Findings)
+			remaining.Summary = ""
+			for _, finding := range targets.Findings.Items {
+				if finding.Category != types.FindingCategoryCICheck {
+					remaining.Items = append(remaining.Items, finding)
+				}
+			}
+			targets = ciFixTargetsFromFindings(remaining)
+			if targets.empty() {
+				return nil, nil
+			}
 		}
-		s.observedCompletedAt = terminalFailureCompletionTimes(checks)
 	}
 	issueDesc := targets.description()
 	sctx.Log(fmt.Sprintf("repairing: %s...", issueDesc))
@@ -121,6 +160,24 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 		// An ordinary fix failure is cheap to repeat and often works the next
 		// time: the next settled observation re-emits the findings and the
 		// executor retries while auto_fix.ci allows.
+		if errors.Is(err, errCIFixAgentCrash) {
+			s.fixAgentCrashes++
+			cause := intent.RedactSecrets(safeurl.RedactText(err.Error()))
+			cause = strings.Map(func(r rune) rune {
+				if unicode.IsControl(r) {
+					return ' '
+				}
+				return r
+			}, cause)
+			cause = strings.Join(strings.Fields(cause), " ")
+			// Error text can contain a whole agent transcript. Keep the
+			// published finding below the IPC frame budget, even for UTF-8.
+			runes := []rune(cause)
+			if len(runes) > 256 {
+				cause = string(runes[:256]) + "..."
+			}
+			s.lastFixAgentCrash = cause
+		}
 		sctx.Log(fmt.Sprintf("warning: CI fix failed: %v", err))
 		return nil, nil
 	}
@@ -275,6 +332,9 @@ CI logs:
 		OnChunk:    sctx.LogChunk,
 	})
 	if err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, pipeline.ErrAgentTimeout) {
+			err = fmt.Errorf("%w: %w", errCIFixAgentCrash, err)
+		}
 		return ciRepairResult{}, fmt.Errorf("agent CI fix: %w", err)
 	}
 
@@ -489,7 +549,7 @@ func ciSelectedFindingsPrompt(findings Findings) string {
 	if err != nil {
 		return ""
 	}
-	section := "\n\nFindings to address (selected for this fix round, with any user instructions):\n" + sanitizedPreviousFindingsForPrompt(encoded)
+	section := "\n\nFindings to address (selected for this fix round, with any user or driver instructions):\n" + sanitizedPreviousFindingsForPrompt(encoded)
 	if len(external) == 0 {
 		return section
 	}

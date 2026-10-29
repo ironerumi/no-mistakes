@@ -58,12 +58,20 @@ func (e *claudeAPIError) Error() string {
 	if len(message) > claudeAPIErrorMessageMaxRunes {
 		message = append(message[:claudeAPIErrorMessageMaxRunes], []rune("...")...)
 	}
+	if e.Status == 0 {
+		return "API error: " + string(message)
+	}
 	return fmt.Sprintf("API error status %d: %s", e.Status, string(message))
 }
 
 func (e *claudeAPIError) classify() (string, bool) {
 	if e.usageLimitReached || isTerminalRetryError(strings.ToLower(e.Message)) {
 		return "", false
+	}
+	if e.Status == 0 {
+		// Network failures have no HTTP status; classify their terminal
+		// diagnostic without letting text override a reported HTTP status.
+		return classifyTransient(errors.New(e.Message))
 	}
 	if status := transientStatusRE.FindString(strconv.Itoa(e.Status)); status != "" {
 		return "http " + status, true
@@ -149,13 +157,15 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	var stdoutTail claudeStdoutTail
 	if err := parseClaudeEvents(ctx, io.TeeReader(started.stdout, &stdoutTail), opts.OnChunk, &usage, &result); err != nil {
 		err = started.waitAfterParseError(err)
-		stderrWG.Wait()
-		retErr := fmt.Errorf("claude parse events: %w", err)
-		emitAgentExited(opts, "claude", pid, retErr)
-		return resultFromUsage(usage), retErr
+		if !started.closedByWaitDelay(err) || !claudeFinishedWithOutput(result, opts.JSONSchema) {
+			stderrWG.Wait()
+			retErr := fmt.Errorf("claude parse events (result received: %t): %w", result != nil, err)
+			emitAgentExited(opts, "claude", pid, retErr)
+			return resultFromUsage(usage), retErr
+		}
 	}
 
-	waitErr := started.wait()
+	waitErr := started.waitKeepingResult(claudeFinishedWithOutput(result, opts.JSONSchema))
 	stderrWG.Wait()
 	if waitErr != nil {
 		if ctx.Err() != nil || opts.RequireCompletedChildren || !claudeFinishedWithOutput(result, opts.JSONSchema) {
@@ -307,8 +317,12 @@ func (r *claudeResult) terminalAPIError() *claudeAPIError {
 	var fields struct {
 		APIErrorStatus int    `json:"api_error_status"`
 		Result         string `json:"result"`
+		TerminalReason string `json:"terminal_reason"`
 	}
-	if err := json.Unmarshal(r.rawEvent, &fields); err != nil || fields.APIErrorStatus == 0 {
+	if err := json.Unmarshal(r.rawEvent, &fields); err != nil {
+		return nil
+	}
+	if fields.APIErrorStatus == 0 && fields.TerminalReason != "api_error" {
 		return nil
 	}
 	return &claudeAPIError{

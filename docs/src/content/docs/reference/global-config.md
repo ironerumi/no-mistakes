@@ -89,6 +89,7 @@ ci:
   rebase_behind: false
   carry_review_on_replay: false
   release_after_checks_pass: false
+  required_reviews: []
 
 rebase:
   strategy: rebase # or: merge
@@ -116,6 +117,7 @@ test:
   evidence:
     store_in_repo: false
     attach_media: true
+    compact: true
     dir: .no-mistakes/evidence
     branch: no-mistakes/evidence
     commit_message: "no-mistakes: evidence for {{.Branch}} (run {{.RunID}})"
@@ -167,7 +169,7 @@ After resolving `auto`, entries that resolve to the same ACP target are deduplic
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
 Fallback candidates share the invocation's existing bounded context and use only its remaining time; once that context expires or is cancelled, no further candidate is announced or started.
-Structured findings and schema/output validation problems do not trigger fallback.
+Structured findings and validation failures in an agent's returned output do not trigger fallback. A recognized Codex provider rejection of the requested structured-output schema does trigger fallback.
 
 ### acpx_path
 
@@ -393,6 +395,34 @@ empty. Nonempty role values override that profile, but native
 `agent_args_override` flags still win. Model availability, credentials, and
 supported effort levels remain the harness/provider's responsibility.
 
+Reviewer roles (`reviewer` and `reviewer_after_round`) also accept an ordered,
+explicit `fallback` list. Each entry requires `agent` and accepts `model` and
+`effort` with the same inheritance and native-argument precedence as the role:
+
+```yaml
+review_agents:
+  reviewer:
+    agent: codex
+    fallback:
+      - {agent: pi, model: openai-codex/gpt-5.4, effort: high}
+```
+
+Only recognized invocation-time provider quota exhaustion advances this list.
+Launch errors, transient failures, invalid review output, timeouts and cancellation
+do not. Each replacement receives the complete review prompt without a session,
+inside the invocation's existing timeout. Subsequent review and coverage turns
+using that role stay on its selected reviewer rather than retrying exhausted
+candidates. The base and later-round reviewer roles have separate fallback chains.
+If all configured reviewers exhaust their quota, review fails without approval.
+The fallback log names both configured candidates, including same-harness profiles.
+See [local invocation evidence](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine)
+for the recorded identities.
+An OpenCode turn that ran tools, or whose tool activity is unknown, cannot fall
+back to a fresh reviewer session.
+These candidates are independent reviewer instances and never fall back to the
+writer or fixer implicitly. `fallback` is global-only, does not use quota routing,
+and accepts neither nested fallback lists nor `after_round`; fixer roles reject it.
+
 #### Later-round role overrides
 
 `reviewer_after_round` and `fixer_after_round` are opt-in overlays for long
@@ -465,6 +495,9 @@ User-supplied flags are normally inserted ahead of no-mistakes' managed flags, s
 | `antigravity` | `--dangerously-skip-permissions`, `--print`, `--json-schema`, `--output-format`, `--conversation`, `-c`, `--continue` |
 
 For structured `codex` runs, no-mistakes also appends its own `--output-schema <tempfile>` after your overrides. Treat that flag as managed even though config validation does not currently reject it.
+
+The selected Codex profile/model's provider must accept that schema. A recognized provider schema rejection lets the next eligible configured fallback agent take over. Without one, the run stops with `codex structured-output incompatibility` and preserves the provider diagnostic. The Codex schema incompatibility is not retried by the adapter or by automatic crash retries. A Review or Test analyzer rerun restarts the agent chain, so Codex may be called again and fail fast before the fallback runs. Review is neither skipped nor retried without the schema. Select a compatible Codex profile/model or configure a different agent route, then rerun the pipeline so review can complete. A profile that works for plain prompts, such as Rebase, can still reject structured review requests.
+
 The Claude, Codex, Grok, Pi, and Antigravity session-control forms are reserved so no-mistakes can keep review-loop conversations deterministic: review turns stay session-free while the fixer keeps its own isolated durable session.
 
 Smart defaults:
@@ -629,6 +662,20 @@ Before retrying, the executor proves that the run and worktree head SHA, recorde
 A hang cut by the default invocation budget can qualify. A non-default agent timeout, or any still-working cap, disables timeout-based crash retries; the shipped timeout values count as unconfigured even when the generated config writes them explicitly. Process exits can still qualify. Test budget cuts that already park for an operator decision remain parked, not automatically retried.
 
 Fix rounds, review-answer/coverage continuations, conflict resolution, custom gates, Intent and Push/PR/CI delivery are not replayed or retried. This budget is separate from `auto_fix`, is not replenished by approval rounds, and is disabled for the remainder of a run resumed after daemon recovery; a later agent crash fails that step normally. It does not continue a terminal run: [`axi retry`](/reference/cli/#axi-retry) is the separate manual continuation, using the shared `agent_invocation` cause and its own checkpoint proofs. Timeout cuts do not acquire that cause, and parser rejections remain terminal. It is global-only: repository config and environment variables cannot enable it.
+
+### max_concurrent_runs
+
+Opt-in cap on how many pipeline runs execute at once on this machine. When the cap is reached, newly submitted runs wait in the queue in submission order with their run row pending, and start as running runs finish, fail, or are cancelled, instead of all starting at once and competing for host memory and CPU.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | integer                |
+| Range   | `0` or greater         |
+| Default | `0` (unlimited)        |
+
+`0` or unset means unlimited. An admitted run holds its slot until its executor finishes, fails, or is cancelled, including while parked at an approval gate. Recovered parked runs use the same cap and wait for a slot before resuming. Cancelling a queued run removes it from the queue without starting or resuming it.
+
+Fresh queued runs do not survive a daemon restart and must be resubmitted. Recovered parked runs waiting for a slot remain recoverable across a clean shutdown. If the global configuration cannot be read, the daemon keeps the last successfully loaded cap. It is global-only: repository config cannot set it.
 
 ### agent_timeout
 
@@ -812,7 +859,7 @@ Accepts any positive Go `time.ParseDuration` string. Global-only: there is no ma
 
 ### gate_reconcile_timeout
 
-Maximum wall time one parked approval-gate reconcile attempt may spend before the attempt stops, the gate stays parked, and the next interval wait begins. Covers host probes such as `gh auth status` that can hang without returning.
+Maximum wall time one parked approval-gate reconcile attempt may spend before the attempt stops, the gate stays parked, and the next interval wait begins. Covers host probes such as `gh auth status` that can hang without returning. The same bound applies to the live verification an approve response runs at a parked CI gate; a verification that times out counts as unverifiable, so it is refused while a [`ci.required_reviews`](/no-mistakes/reference/repo-config/#cirequired_reviews) requirement applies and otherwise recorded as an explicit override.
 
 |         |                        |
 | ------- | ---------------------- |
@@ -975,6 +1022,12 @@ Each rerun is another provider-side workflow run billed to the repository being 
 Set `0` here to never spend someone else's CI minutes; this is the only place to make that choice for a repository whose default branch you do not control.
 
 The per-repo [`ci.rerun_transient`](/no-mistakes/reference/repo-config/#cirerun_transient) overrides this value and owns the classification, the trust boundary, and every case that skips the rerun.
+
+### ci.required_reviews
+
+The operator-level fallback for [`ci.required_reviews`](/no-mistakes/reference/repo-config/#cirequired_reviews).
+That reference owns supported reviewer profiles, completion evidence, and the trust boundary.
+Defaults to `[]`; the trusted repository list overrides it, including an explicit empty list.
 
 ### ci.revalidate_repairs
 
@@ -1210,10 +1263,30 @@ An invalid entry fails configuration loading, and a render failure at commit tim
 Trailers are added to Review, Test, Document, and Lint fix commits, operator-authorized repository gate repairs, and CI repair commits. Commits that no single invocation produced get none rather than a guessed agent: the Push step's catch-all commit, a CI repair retried after a protected-path refusal, and rebase or merge commits that an agent writes itself.
 A per-repo [`commit.trailers`](/no-mistakes/reference/repo-config/#committrailers) list or a matching [`repository_overrides`](#repository_overrides) entry replaces this list rather than extending it; an empty list clears it.
 
+### pr.appendix
+
+Machine-wide default for the generated PR evidence appendix:
+
+```yaml
+pr:
+  appendix: collapsed # full | collapsed | minimal
+```
+
+Precedence: a non-empty trusted repository `pr.appendix`, then a matching
+[`repository_overrides`](#machine-local-pr-publication-defaults) value, then this
+global value, then built-in `full`. An unset or empty value inherits the next
+layer. The pushed branch cannot choose the appendix mode, even with
+`allow_repo_commands: true`.
+
+All modes retain the pipeline attestation. See the repository
+[`pr.appendix`](/no-mistakes/reference/repo-config/#prappendix) reference for
+rendering behavior and provider caveats. Invalid modes fail config loading.
+`pr.template` and `pr.publish_intent` are not machine-wide settings.
+
 ### repository_overrides
 
 Machine-local settings scoped to one repository by remote host and full repository path.
-This lets one machine add checks, lower command scheduling priority, add review and documentation guidance, or apply ticket conventions without adding settings to that repository.
+This lets one machine add checks, lower command scheduling priority, add review, documentation, and live-validation guidance, or apply ticket conventions without adding settings to that repository.
 Remote hosts are matched case-insensitively.
 HTTP, HTTPS, SSH, and Git-protocol URLs, plus scp-style remotes, are accepted; the transport scheme is not part of the match.
 A URL's scheme-default port (80, 443, 22, or 9418 for HTTP, HTTPS, SSH, or Git) matches an omitted port; non-default ports remain distinct.
@@ -1253,12 +1326,12 @@ repository_overrides:
 
 `pr.template` selects a repository-relative file, never local template contents. It uses the same [path and file validation](/no-mistakes/reference/repo-config/#prtemplate) as the repository setting, and its bytes are read only from the pinned trusted default-branch tree, never from the pushed branch or worktree.
 `pr.appendix` accepts `full`, `collapsed`, or `minimal` and can be set with or without `pr.template`; it uses the same [appendix and attestation behavior](/no-mistakes/reference/repo-config/#prappendix) as the repository setting. When template mode is active, author-edited narrative is preserved on later updates.
-For each field, a non-empty trusted repository value wins over the matching machine-local value. Leaving either unset retains existing behavior; an unset appendix defaults to `full`.
-These fields are available only under `repository_overrides`, not as machine-wide PR settings. `pr.publish_intent` remains trusted-repository-only.
+For `pr.template`, a non-empty trusted repository value wins over the matching machine-local value. For appendix inheritance, see [`pr.appendix` precedence](#prappendix).
+`pr.template` is available only under `repository_overrides`, not as a machine-wide PR setting. `pr.publish_intent` remains trusted-repository-only.
 
-#### Machine-local review and documentation guidance
+#### Machine-local review, documentation, and test guidance
 
-A matching entry can add review rules and documentation policy for that one repository, without committing anything to it:
+A matching entry can add review rules, documentation policy, and a live-validation runbook for that one repository, without committing anything to it:
 
 ```yaml
 repository_overrides:
@@ -1271,14 +1344,19 @@ repository_overrides:
     document:
       instructions: |
         Configuration keys are owned by docs/reference/config.md.
+    test:
+      instructions: |
+        Never install, launch, or test on a physical device; drive the emulator only.
 ```
 
 `review.path_instructions` behaves like the [global list](#reviewpath_instructions): its rules render in their own labeled section after the global rules and before the repository's trusted rules, and they count toward the same combined limits.
 `document.instructions` is added to the document step's prompt in a labeled section before the repository's trusted [`document.instructions`](/no-mistakes/reference/repo-config/#documentinstructions), and like that field it augments the built-in placement policy and cannot weaken it.
-Both are additive only: the repository's trusted values still apply in full.
-Under `review` only `path_instructions` is accepted, and under `document` only `instructions`; settings that could weaken a gate, such as `no_ci`, `allow_repo_commands`, or `pr.base_branch`, are not accepted here.
+`test.instructions` is added to the Test step's repair and evidence prompts in a labeled section before the repository's trusted [`test.instructions`](/no-mistakes/reference/repo-config/#testinstructions) runbook.
+All three are additive only: the repository's trusted values still apply in full, and a pushed branch can supply none of them.
+Under `review` only `path_instructions` is accepted, under `document` only `instructions`, and under `test` only `instructions`; settings that could weaken a gate, such as `no_ci`, `allow_repo_commands`, or `pr.base_branch`, are not accepted here.
+Changes apply to the next run, and to a run recovered after a daemon restart, which re-reads this file.
 
-Eval replay cases store no remote URL, so a replay does not apply a matching entry's review or documentation guidance.
+Eval replay cases store no remote URL, so a replay does not apply a matching entry's review, documentation, or test guidance.
 
 #### Machine-local commands
 
@@ -1374,6 +1452,7 @@ By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>`. On 
 | ----------------------------- | -------- | ------------------------ | -------------------------------------------------------------------------- |
 | `test.evidence.store_in_repo` | `bool`   | `false`                  | Publish test evidence artifacts to the repository's orphan evidence branch |
 | `test.evidence.attach_media`  | `bool`   | `true`                   | Upload image and video evidence to GitHub user-attachments when the PR is rendered |
+| `test.evidence.compact`       | `bool`   | `true`                   | Keep the PR Testing section compact; set `false` for inline previews and expanded details |
 | `test.evidence.dir`           | `string` | `.no-mistakes/evidence`  | Directory prefix inside the evidence branch                                |
 | `test.evidence.branch`        | `string` | `no-mistakes/evidence`   | Name of the orphan evidence branch                                         |
 | `test.evidence.commit_message` | `string` | `no-mistakes: evidence for {{.Branch}} (run {{.RunID}})` | Subject template for evidence-branch commits |
@@ -1381,12 +1460,16 @@ By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>`. On 
 | `test.evidence.retention`     | `string` | `336h` (14 days)         | How long a run's evidence survives; `unlimited`/`none`/`off`/`never` or a non-positive duration disables the bound |
 | `test.evidence.max_runs`      | `int`    | `200`                    | How many run directories survive regardless of age; `0` disables the bound |
 
+`compact: true` preserves the compact PR Testing section. Set `compact: false` to opt into inline screenshot/GIF previews, video embeds, visible log/text blocks, individual test-command bullets, and a summary bullet. Both modes retain inspectable artifact links alongside previews when published links are available. This presentation setting does not enable uploads or evidence publication; for commit-pinned inline images, also enable `store_in_repo`.
+
+Non-compact sections are taller and can approach GitHub's PR body size limit sooner, especially with many screenshots. Repository weight is unchanged: with `store_in_repo` enabled, the same artifacts are committed to the evidence branch in either mode. Pipeline steps and their order are unchanged.
+
 The test step always collects evidence outside the worktree, so artifacts never enter the branch under validation.
-On GitHub.com and GitHub Enterprise Cloud, image and video artifacts that pass GitHub's attach rules (png, jpg, jpeg, gif, webp, svg, mp4, mov, webm; images at most 10 MiB and videos at most 100 MiB) are uploaded to GitHub user-attachments when the PR body is rendered, unless `attach_media` is false and `store_in_repo` is also false.
-Uploads need the raw GitHub token, which the PR step reads once per PR render with `gh auth token`; when that read fails, the step logs one line and skips every remaining upload in that render instead of asking again per file. If your `gh` sits behind a credential vault or disclosure gate that prompts before it releases the token, set `attach_media: false` (with `store_in_repo` also false) so the PR step never asks for it.
-The testing section embeds the returned image markdown or bare video URL so remote reviewers can open the media. Upload is fail-closed: any error, unsupported type, oversize file, GitHub Enterprise Server, non-GitHub forge, or GitHub App/Actions token keeps today's rendering (a commit-pinned evidence-branch link if `store_in_repo` published, otherwise a local path) rather than a dead attachment URL. Text artifacts stay inlined as they are today.
+On GitHub.com and GitHub Enterprise Cloud, image and video artifacts that pass GitHub's attach rules (png, jpg, jpeg, gif, webp, svg, mp4, mov, webm; images at most 10 MiB and videos at most 100 MiB) are uploaded to GitHub user-attachments when the PR body is rendered, unless `attach_media` is false. Setting `attach_media: false` disables uploads even when `store_in_repo: true`; evidence-branch publication and its commit-pinned links remain enabled.
+Uploads need the raw GitHub token, which the PR step reads once per PR render with `gh auth token`; when that read fails, the step logs one line and skips every remaining upload in that render instead of asking again per file. If your `gh` sits behind a credential vault or disclosure gate that prompts before it releases the token, set `attach_media: false` so the PR step never asks for it.
+The testing section embeds the returned image markdown or bare video URL so remote reviewers can open the media. Upload is fail-closed: any error, unsupported type, oversize file, GitHub Enterprise Server, non-GitHub forge, or GitHub App/Actions token falls back to the configured evidence presentation rather than a dead attachment URL. Published evidence retains commit-pinned links, with previews when `compact: false`; unpublished local artifacts retain local references. Text artifacts remain inline or collapsible according to `compact`.
 When `store_in_repo` is true for a GitHub repository, the PR step copies that directory onto `branch` under `<dir>/<branch-slug>` in the code branch's push-target repository (the fork when fork routing is configured), pushes it, and links the artifacts from the pull request body.
-Published text files get the same home-directory redaction as the PR title and body, so a path under the operator's home is committed with that part rewritten to `~`. Binary and visual artifacts are published as written, and the local evidence files are never changed.
+Published text files get the same home-directory redaction as the PR title and body, so a path under the operator's home is committed with that part rewritten to `~`. Before that, the run's worktree root, and any path into another run worktree under `<NM_HOME>/worktrees/<repo-id>/<run-id>`, is rewritten to `{run-worktree}` (a bare `<NM_HOME>/worktrees` or `<NM_HOME>/worktrees/<repo-id>` to `{worktrees}`), because the repo id is a hash of the local checkout path and `NM_HOME` may sit outside the home directory. Binary and visual artifacts are published as written, and the local evidence files are never changed.
 When both `attach_media` and `store_in_repo` apply, the testing section carries the user-attachments embed in addition to the commit-pinned git link.
 The branch is an orphan: it shares no history with your code branches, so evidence never reaches the default branch. Links use the evidence commit rather than the branch, so they keep resolving after later runs.
 Branch slashes become nested directories, unsafe branch characters are replaced, and an empty branch slug falls back to the run ID.
@@ -1412,7 +1495,7 @@ Reaping runs after each finished run and again at daemon startup. An upgraded da
 
 `local_root` must be an absolute path outside `<NM_HOME>/worktrees`; a relative or managed-worktree path fails daemon startup and prevents new or recovered runs from starting. Because `retention` bounds how long a PR body's local artifact links keep resolving, raise it rather than lowering it if your reviews run long.
 
-The publication fields are global defaults. Repo config can override `store_in_repo`, `attach_media`, `dir`, and `commit_message`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
+The publication fields are global defaults. Repo config can override `store_in_repo`, `attach_media`, `compact`, `dir`, and `commit_message`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
 
 `test.evidence.retention` and `test.evidence.max_runs` also bound `<NM_HOME>/logs/<run-id>` (per-run step logs), reaped on the same cadence rather than through a second config surface for the same kind of per-run diagnostic artifact.
 
