@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -44,14 +45,23 @@ type StepFactory func() []pipeline.Step
 
 var recoveredConfigFetchTimeout = 10 * time.Second
 
+// These bounds leave the caller's IPC deadline enough time to receive the
+// timeout response. The client deadline is carried on the IPC request and is
+// preferred when it is sooner.
+var handoffRequestTimeout = 25 * time.Second
+var handoffRequestSafetyMargin = time.Second
+
 var fetchRecoveredRemoteBranch = git.FetchRemoteBranch
 
 // RunManager tracks active pipeline executors and manages run lifecycle.
 type RunManager struct {
-	mu        sync.Mutex
-	executors map[string]*pipeline.Executor      // runID → executor
-	cancels   map[string]context.CancelCauseFunc // runID → cancel function with cause
-	dones     map[string]chan struct{}           // runID → closed when goroutine exits
+	mu              sync.Mutex
+	executors       map[string]*pipeline.Executor      // runID → executor
+	cancels         map[string]context.CancelCauseFunc // runID → cancel function with cause
+	dones           map[string]chan struct{}           // runID → closed when goroutine exits
+	handoffRequests map[string]*handoffRequest         // runID → pending monitor request
+	ciMonitorActive map[string]bool                    // runID → CI monitor accepts observations
+	ciWakes         map[string]chan struct{}           // runID → CI poll wake signal
 	// runQueue holds submissions waiting for setup or an execution slot under
 	// the max_concurrent_runs cap, in submission order. Guarded by mu; see
 	// run_queue.go.
@@ -92,21 +102,44 @@ type RunManager struct {
 // past the cap is an ordinary error, never unbounded growth.
 const maxSubscribersPerRun = 32
 
+type handoffRequest struct {
+	result chan error
+}
+
+func handoffContext(parent context.Context) (context.Context, context.CancelFunc) {
+	now := time.Now()
+	deadline := now.Add(handoffRequestTimeout)
+	clientDeadline, ok := parent.Deadline()
+	if !ok {
+		clientDeadline, ok = ipc.RequestDeadline(parent)
+	}
+	if ok {
+		clientDeadline = clientDeadline.Add(-handoffRequestSafetyMargin)
+		if clientDeadline.Before(deadline) {
+			deadline = clientDeadline
+		}
+	}
+	return context.WithDeadline(parent, deadline)
+}
+
 // NewRunManager creates a RunManager. Pass nil for stepFactory to use default steps.
 func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *RunManager {
 	if stepFactory == nil {
 		stepFactory = func() []pipeline.Step { return steps.AllSteps() }
 	}
 	return &RunManager{
-		executors:     make(map[string]*pipeline.Executor),
-		cancels:       make(map[string]context.CancelCauseFunc),
-		dones:         make(map[string]chan struct{}),
-		db:            database,
-		paths:         p,
-		steps:         stepFactory,
-		subscribers:   make(map[string][]*eventMailbox),
-		stateRevs:     make(map[string]int64),
-		completedRuns: make(map[string]bool),
+		executors:       make(map[string]*pipeline.Executor),
+		cancels:         make(map[string]context.CancelCauseFunc),
+		dones:           make(map[string]chan struct{}),
+		handoffRequests: make(map[string]*handoffRequest),
+		ciMonitorActive: make(map[string]bool),
+		ciWakes:         make(map[string]chan struct{}),
+		db:              database,
+		paths:           p,
+		steps:           stepFactory,
+		subscribers:     make(map[string][]*eventMailbox),
+		stateRevs:       make(map[string]int64),
+		completedRuns:   make(map[string]bool),
 	}
 }
 
@@ -290,6 +323,9 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
 	cfg := config.MergeForRemote(globalCfg, effectiveRepoCfg, repo.UpstreamURL)
+	if err := applyPinnedIntentCheck(cfg, run); err != nil {
+		return nil, err
+	}
 	if err := cfg.Review.ValidatePathInstructionsBudget(); err != nil {
 		return nil, err
 	}
@@ -350,9 +386,7 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 		if !ok {
 			continue
 		}
-		roleConfig := cfg.ForReviewAgent(entry)
-		roleConfig.QuotaRouting.Enabled = false
-		next, _, err := newConfiguredAgent(ctx, roleConfig, evidenceRoot, lookPath, environment, nil)
+		next, err := newReviewRoleAgent(ctx, cfg, entry, evidenceRoot, lookPath, environment)
 		if err != nil {
 			_ = primary.Close()
 			for _, existing := range roles {
@@ -374,6 +408,28 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 			LateFrom: cfg.ReviewAgentTakeoverRound(config.RoleFixerAfterRound),
 		},
 	}), record, nil
+}
+
+func newReviewRoleAgent(ctx context.Context, cfg *config.Config, entry config.ReviewAgent, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay) (agent.Agent, error) {
+	var created []agent.Agent
+	var models []string
+	for _, candidate := range append([]config.ReviewAgent{entry}, entry.Fallback...) {
+		roleConfig := cfg.ForReviewAgent(candidate)
+		roleConfig.QuotaRouting.Enabled = false
+		next, _, err := newConfiguredAgent(ctx, roleConfig, evidenceRoot, lookPath, environment, nil)
+		if err != nil {
+			for _, existing := range created {
+				_ = existing.Close()
+			}
+			return nil, err
+		}
+		created = append(created, next)
+		models = append(models, roleConfig.AgentProfileFor(candidate.Agent).Model)
+	}
+	if len(entry.Fallback) == 0 {
+		return created[0], nil
+	}
+	return agent.NewFallback(created, agent.WithReviewerQuotaFallback(models...)), nil
 }
 
 func newConfiguredAgent(ctx context.Context, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay, quota *quotarouting.Record) (agent.Agent, *quotarouting.Record, error) {
@@ -491,6 +547,10 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
+	executor.SetCIObservationTransition(m.transitionCIObservation)
+	executor.SetCIMonitorLifecycle(m.transitionCIMonitorLifecycle)
+	executor.SetCIWake(m.ciWake)
+	executor.SetHandoffPending(m.handoffPending)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -531,6 +591,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 				delete(m.executors, plan.run.ID)
 				delete(m.cancels, plan.run.ID)
 				delete(m.dones, plan.run.ID)
+				m.resolveHandoffRequestLocked(plan.run.ID, errors.New("run ended before handoff"))
+				delete(m.ciWakes, plan.run.ID)
+				delete(m.ciMonitorActive, plan.run.ID)
 				m.mu.Unlock()
 				// A freed slot starts the next queued run, if any.
 				m.pumpQueue()
@@ -1372,6 +1435,8 @@ func fetchRunDefaultBranch(ctx context.Context, workDir string, repo *db.Repo) e
 // caller-owned private ref on the gate. It does not rewrite origin tracking
 // refs, FETCH_HEAD, or any shared worktree ref, so a refused Pi pin cannot
 // perturb an in-flight validation that must stay running.
+var fetchIntentTrustedDefaultBranchSHA = fetchTrustedDefaultBranchSHA
+
 func fetchTrustedDefaultBranchSHA(ctx context.Context, gateDir string, repo *db.Repo, purpose string) (string, error) {
 	if strings.TrimSpace(repo.DefaultBranch) == "" {
 		return "", fmt.Errorf("cannot evaluate %s: repository has no known default branch to read trusted config from", purpose)
@@ -1410,6 +1475,45 @@ func (m *RunManager) validatePiProfileAgentsBeforeCancel(ctx context.Context, re
 		return err
 	}
 	return cfg.ValidatePiProfileAgents()
+}
+
+// applyPinnedIntentCheck makes an existing run keep the policy under which it
+// was admitted. Historical rows without a snapshot remain off rather than
+// acquiring a new admission rule during recovery.
+func applyPinnedIntentCheck(cfg *config.Config, run *db.Run) error {
+	if cfg == nil || run == nil {
+		return fmt.Errorf("cannot restore intent check without run configuration")
+	}
+	if run.IntentCheckJSON == nil {
+		cfg.Intent.Check = config.IntentCheck{Mode: config.IntentCheckOff}
+		return nil
+	}
+	check, err := config.ParseIntentCheckJSON([]byte(*run.IntentCheckJSON))
+	if err != nil {
+		return err
+	}
+	cfg.Intent.Check = check
+	return nil
+}
+
+func (m *RunManager) effectiveIntentCheckBeforeRun(ctx context.Context, repo *db.Repo, global *config.GlobalConfig, trustedSHA string) (config.IntentCheck, error) {
+	gateDir := m.paths.RepoDir(repo.ID)
+	entry, err := git.Run(ctx, gateDir, "ls-tree", trustedSHA, "--", ".no-mistakes.yaml")
+	if err != nil {
+		return config.IntentCheck{}, fmt.Errorf("cannot evaluate intent check: trusted tree is unreadable: %w", err)
+	}
+	trusted := config.IntentCheck{Mode: config.IntentCheckOff}
+	if entry != "" {
+		content, err := git.ShowFile(ctx, gateDir, trustedSHA, ".no-mistakes.yaml")
+		if err != nil {
+			return config.IntentCheck{}, fmt.Errorf("cannot evaluate intent check: trusted config is unreadable: %w", err)
+		}
+		trusted, err = config.ParseIntentCheckYAML([]byte(content))
+		if err != nil {
+			return config.IntentCheck{}, fmt.Errorf("cannot evaluate intent check: trusted .no-mistakes.yaml is invalid: %w", err)
+		}
+	}
+	return config.MergeIntentChecks(global.Intent.Check, trusted), nil
 }
 
 // effectiveConfigBeforeRun resolves the configuration a run at headSHA would
@@ -1535,7 +1639,61 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// stamp back instead of a since-changed config file. Legacy launches keep
 	// their failed-row diagnostics on a bad global config: the load error is
 	// held until the row exists.
+	storedIntent := intent
+	if source != db.RunIntentSourceRerun && launchNonce == "" && planID == "" {
+		storedIntent = strings.TrimSpace(storedIntent)
+	}
 	globalCfg, globalCfgErr := config.LoadGlobal(m.paths.ConfigFile())
+	if globalCfgErr != nil && strings.Contains(globalCfgErr.Error(), "intent.check") {
+		trackStartFailure("intent_check_config")
+		return "", fmt.Errorf("load intent check policy: %w", globalCfgErr)
+	}
+	var intentCheckJSON string
+	var trustedSHA string
+	var trustedFetchErr error
+	var err error
+	trustedFetchAttempted := false
+	if globalCfgErr == nil {
+		check := globalCfg.Intent.Check
+		trustedSHA, trustedFetchErr = fetchIntentTrustedDefaultBranchSHA(ctx, m.paths.RepoDir(repo.ID), repo, "intent check")
+		trustedFetchAttempted = true
+		if trustedFetchErr == nil {
+			check, err = m.effectiveIntentCheckBeforeRun(ctx, repo, globalCfg, trustedSHA)
+			if err != nil {
+				trackStartFailure("intent_check_config")
+				return "", err
+			}
+		} else {
+			// Keep intent checks unavailable when their trusted policy cannot be
+			// read; the same failed fetch is reused by trusted-config loading.
+			trustedSHA = ""
+			check = config.IntentCheck{Mode: config.IntentCheckOff}
+		}
+		// Resolve the effective policy, not just the global mode: a trusted
+		// repository rule must reject before cancelActiveRuns, including retries.
+		if check.Mode != config.IntentCheckOff {
+			policyIntent := storedIntent
+			if retry != nil && retry.source != nil && retry.source.Intent != nil {
+				policyIntent = *retry.source.Intent
+			}
+			if matches := check.Match(policyIntent); len(matches) > 0 {
+				switch check.Mode {
+				case config.IntentCheckReject:
+					trackStartFailure("intent_check_rejected")
+					return "", fmt.Errorf("intent rejected by configured rules: %s", strings.Join(matches, ", "))
+				case config.IntentCheckWarn:
+					slog.Warn("run intent matched configured rules", "rules", strings.Join(matches, ", "))
+				}
+			}
+		}
+		policy, err := json.Marshal(check)
+		if err != nil {
+			trackStartFailure("intent_check_snapshot")
+			return "", fmt.Errorf("serialize intent check policy: %w", err)
+		}
+		intentCheckJSON = string(policy)
+	}
+
 	var pin *agentcfg.PiProfile
 	if request := agentcfg.OptionalPiProfile(profiles); request != nil {
 		if globalCfgErr != nil {
@@ -1576,10 +1734,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
 
-	storedIntent := intent
-	if source != db.RunIntentSourceRerun && launchNonce == "" && plan == nil {
-		storedIntent = strings.TrimSpace(storedIntent)
-	}
 	var runIntent *db.RunIntent
 	if strings.TrimSpace(storedIntent) != "" {
 		if source == "" {
@@ -1603,6 +1757,14 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
+	}
+	if intentCheckJSON != "" {
+		if err := m.db.SetRunIntentCheck(run.ID, intentCheckJSON); err != nil {
+			m.db.UpdateRunError(run.ID, fmt.Sprintf("pin intent check: %s", err))
+			trackStartFailure("pin_intent_check")
+			return "", fmt.Errorf("pin intent check: %w", err)
+		}
+		run.IntentCheckJSON = &intentCheckJSON
 	}
 	if inherited := strings.TrimSpace(inheritedPRURL); inherited != "" {
 		if err := m.db.UpdateRunPRURL(run.ID, inherited); err != nil {
@@ -1692,8 +1854,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// the resolve, a stale origin/<defaultBranch> left in the shared bare
 	// repo by a previous run could serve a trusted copy that the live default
 	// branch has already removed - silently running stale shell.
-	var trustedSHA string
-	if repo.DefaultBranch != "" {
+	if !trustedFetchAttempted && repo.DefaultBranch != "" {
 		fetchErr := fetchRunDefaultBranch(ctx, wtDir, repo)
 		if fetchErr != nil {
 			slog.Warn("failed to fetch default branch into worktree; trusted config disabled (commands/agent from pushed branch will be dropped)", "run_id", run.ID, "branch", repo.DefaultBranch, "error", fetchErr)
@@ -1726,6 +1887,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// commands/agent empty. An unreadable trusted tree aborts below.
 	// SECURITY: a trusted-config fetch failure must abort, not silently disable
 	// the disable_project_settings opt-out (see assertGateTrustedConfigReadable).
+	if trustedFetchErr != nil {
+		slog.Warn("failed to fetch default branch into worktree; trusted config disabled (commands/agent from pushed branch will be dropped)", "run_id", run.ID, "branch", repo.DefaultBranch, "error", trustedFetchErr)
+	}
 	if err := assertGateTrustedConfigReadable(ctx, wtDir, repo.DefaultBranch, trustedSHA); err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("trusted_config_unreadable")
@@ -1743,6 +1907,38 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		slog.Info("repo commands/agent loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
 	}
 	cfg := config.MergeForRemote(globalCfg, effectiveRepoCfg, repo.UpstreamURL)
+	if run.IntentCheckJSON == nil {
+		policy, err := json.Marshal(cfg.Intent.Check)
+		if err != nil {
+			m.db.UpdateRunError(run.ID, fmt.Sprintf("serialize intent check policy: %s", err))
+			return "", err
+		}
+		if err := m.db.SetRunIntentCheck(run.ID, string(policy)); err != nil {
+			m.db.UpdateRunError(run.ID, fmt.Sprintf("pin intent check: %s", err))
+			return "", fmt.Errorf("pin intent check: %w", err)
+		}
+		policyJSON := string(policy)
+		run.IntentCheckJSON = &policyJSON
+	}
+	if err := applyPinnedIntentCheck(cfg, run); err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("pinned_intent_check")
+		return "", err
+	}
+	policyIntent := ""
+	if run.Intent != nil {
+		policyIntent = *run.Intent
+	}
+	if matches := cfg.Intent.Check.Match(policyIntent); len(matches) > 0 {
+		switch cfg.Intent.Check.Mode {
+		case config.IntentCheckReject:
+			m.db.UpdateRunError(run.ID, "intent rejected by configured rules")
+			trackStartFailure("intent_check_rejected")
+			return "", fmt.Errorf("intent rejected by configured rules: %s", strings.Join(matches, ", "))
+		case config.IntentCheckWarn:
+			slog.Warn("run intent matched configured rules", "rules", strings.Join(matches, ", "))
+		}
+	}
 	if err := cfg.Review.ValidatePathInstructionsBudget(); err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("review_path_instructions_budget")
@@ -1841,6 +2037,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// Create executor with event broadcast.
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	executor.SetCIObservationTransition(m.transitionCIObservation)
+	executor.SetCIMonitorLifecycle(m.transitionCIMonitorLifecycle)
+	executor.SetCIWake(m.ciWake)
+	executor.SetHandoffPending(m.handoffPending)
 	executor.SetForgeContext(forgeCtx)
 	executor.SetSkippedSteps(skipSteps)
 	if retry != nil {
@@ -1911,6 +2111,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 				delete(m.executors, run.ID)
 				delete(m.cancels, run.ID)
 				delete(m.dones, run.ID)
+				m.resolveHandoffRequestLocked(run.ID, errors.New("run ended before handoff"))
+				delete(m.ciWakes, run.ID)
+				delete(m.ciMonitorActive, run.ID)
 				m.mu.Unlock()
 				// A freed slot starts the next queued run, if any.
 				m.pumpQueue()
@@ -2335,6 +2538,7 @@ func (m *RunManager) Shutdown() {
 	cancels := make(map[string]context.CancelCauseFunc, len(m.cancels))
 	for id, cancel := range m.cancels {
 		cancels[id] = cancel
+		m.resolveHandoffRequestLocked(id, pipeline.ErrDaemonShutdown)
 	}
 	m.mu.Unlock()
 
@@ -2366,6 +2570,7 @@ func (m *RunManager) HandleCancel(runID string) error {
 		return nil
 	}
 	cancel, ok := m.cancels[runID]
+	m.resolveHandoffRequestLocked(runID, fmt.Errorf(types.RunCancelReasonAbortedByUser))
 	m.mu.Unlock()
 
 	if !ok {
@@ -2374,6 +2579,147 @@ func (m *RunManager) HandleCancel(runID string) error {
 
 	cancel(fmt.Errorf(types.RunCancelReasonAbortedByUser))
 	return nil
+}
+
+func (m *RunManager) transitionCIObservation(runID string, withdrawal, completes bool, reason string, persist func() error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	req := m.handoffRequests[runID]
+	if req != nil && (withdrawal || completes) {
+		delete(m.handoffRequests, runID)
+		if err := persist(); err != nil {
+			req.result <- err
+			return err
+		}
+		if completes {
+			req.result <- nil
+			return pipeline.ErrHandoff
+		}
+		if reason == "" {
+			reason = "the monitor is no longer ready"
+		}
+		req.result <- fmt.Errorf("handoff refused: %s", reason)
+		return nil
+	}
+	return persist()
+}
+
+func (m *RunManager) transitionCIMonitorLifecycle(runID string, active bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ciMonitorActive[runID] = active
+	if !active {
+		m.resolveHandoffRequestLocked(runID, errors.New("CI monitor is no longer active"))
+	}
+}
+
+func (m *RunManager) handoffPending(runID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.handoffRequests[runID] != nil
+}
+func (m *RunManager) ciWake(runID string) <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ciWakes[runID]
+}
+
+func (m *RunManager) resolveHandoffRequestLocked(runID string, err error) {
+	if req := m.handoffRequests[runID]; req != nil {
+		delete(m.handoffRequests, runID)
+		req.result <- err
+	}
+}
+
+func (m *RunManager) HandleHandoff(ctx context.Context, runID string) error {
+	requestCtx, cancel := handoffContext(ctx)
+	defer cancel()
+
+	m.mu.Lock()
+	_, ok := m.cancels[runID]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("no active CI monitor for run %s; use axi status to inspect the run", runID)
+	}
+	if !m.ciMonitorActive[runID] {
+		m.mu.Unlock()
+		return fmt.Errorf("handoff requires an actively monitoring CI step; use axi run to resolve gates, or axi abort to discard the run")
+	}
+	if m.handoffRequests[runID] != nil {
+		m.mu.Unlock()
+		return fmt.Errorf("handoff already requested for run %s; use axi status to inspect the run", runID)
+	}
+	run, err := m.db.GetRun(runID)
+	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	if run == nil || run.Status != types.RunRunning || run.PRURL == nil || strings.TrimSpace(*run.PRURL) == "" {
+		m.mu.Unlock()
+		return fmt.Errorf("handoff requires an open PR with checks-passed; use axi run to wait for green CI, or axi abort to discard the run")
+	}
+	if run.PRState == nil || *run.PRState != "open" {
+		m.mu.Unlock()
+		return fmt.Errorf("handoff requires an open PR with checks-passed; use axi run to wait for green CI, or axi abort to discard the run")
+	}
+	if run.CIReadyAt == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("handoff requires an open PR with checks-passed; use axi run to wait for green CI, or axi abort to discard the run")
+	}
+	steps, err := m.db.GetStepsByRun(runID)
+	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	monitoring := false
+	for _, step := range steps {
+		if step.StepName == types.StepCI && step.Status == types.StepStatusRunning {
+			monitoring = true
+			break
+		}
+	}
+	if !monitoring {
+		m.mu.Unlock()
+		return fmt.Errorf("handoff requires an actively monitoring CI step; use axi run to resolve gates, or axi abort to discard the run")
+	}
+	req := &handoffRequest{result: make(chan error, 1)}
+	m.handoffRequests[runID] = req
+	if wake := m.ciWakes[runID]; wake != nil {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+	m.mu.Unlock()
+
+	select {
+	case err := <-req.result:
+		return err
+	case <-requestCtx.Done():
+		var timeoutErr error
+		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
+			timeoutErr = fmt.Errorf("handoff timed out waiting for CI monitor observation: %w", context.DeadlineExceeded)
+		} else {
+			timeoutErr = fmt.Errorf("handoff timed out because the client disconnected: %w", context.Canceled)
+		}
+		m.mu.Lock()
+		if m.handoffRequests[runID] == req {
+			delete(m.handoffRequests, runID)
+			m.mu.Unlock()
+			return timeoutErr
+		}
+		m.mu.Unlock()
+		// A monitor transition won the race with the deadline. Its result is
+		// authoritative when it has already resolved this request. A retry may
+		// have replaced it after cleanup, though; do not wait forever on the
+		// superseded request's channel in that case.
+		select {
+		case err := <-req.result:
+			return err
+		default:
+			return timeoutErr
+		}
+	}
 }
 
 // cancelActiveRuns cancels any in-progress runs for the given repo+branch
@@ -2411,6 +2757,7 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 		m.mu.Lock()
 		cancel, ok := m.cancels[run.ID]
 		done := m.dones[run.ID]
+		m.resolveHandoffRequestLocked(run.ID, fmt.Errorf(types.RunCancelReasonSuperseded))
 		m.mu.Unlock()
 		if !ok {
 			continue

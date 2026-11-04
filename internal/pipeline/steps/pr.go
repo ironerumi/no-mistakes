@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path"
@@ -30,8 +31,9 @@ type PRStep struct {
 }
 
 type prContent struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
+	Title       string         `json:"title"`
+	Body        string         `json:"body"`
+	IntentBrief *prIntentBrief `json:"intent_brief,omitempty"`
 }
 
 var prContentSchema = json.RawMessage(`{
@@ -43,12 +45,45 @@ var prContentSchema = json.RawMessage(`{
 	"required": ["title", "body"]
 }`)
 
+var prContentBriefSchema = json.RawMessage(`{
+	"type": "object",
+	"properties": {
+		"title": {"type": "string", "description": "Concise pull request title following repository configuration"},
+		"body": {"type": "string", "description": "GitHub-flavored markdown body starting with ## What Changed. Plain text, NOT JSON."},
+		"intent_brief": {
+			"type": "object", "properties": {
+				"goal": {"type": "string", "maxLength": 200},
+				"why": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 220}},
+				"scope": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 220}},
+				"out_of_scope": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 220}}
+			}, "required": ["goal", "why", "scope", "out_of_scope"], "additionalProperties": false
+		}
+	},
+	"required": ["title", "body", "intent_brief"]
+}`)
+
 var prTitleSchema = json.RawMessage(`{
 	"type": "object",
 	"properties": {
 		"title": {"type": "string", "description": "Bare concise pull request title text"}
 	},
 	"required": ["title"]
+}`)
+
+var prTitleBriefSchema = json.RawMessage(`{
+	"type": "object",
+	"properties": {
+		"title": {"type": "string", "description": "Bare concise pull request title text"},
+		"intent_brief": {
+			"type": "object", "properties": {
+				"goal": {"type": "string", "maxLength": 200},
+				"why": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 220}},
+				"scope": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 220}},
+				"out_of_scope": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 220}}
+			}, "required": ["goal", "why", "scope", "out_of_scope"], "additionalProperties": false
+		}
+	},
+	"required": ["title", "intent_brief"]
 }`)
 
 const (
@@ -69,6 +104,7 @@ type pipelineUpdateGroup struct {
 func (s *PRStep) Name() types.StepName { return types.StepPR }
 
 func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	sctx.PublicIntentBrief = ""
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
@@ -140,7 +176,10 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err != nil {
 				return nil, fmt.Errorf("read existing PR before publication: %w", err)
 			}
-		} else if template != "" {
+		} else if template != "" || keepsPRUpdateText(sctx) {
+			if template == "" {
+				return nil, fmt.Errorf("provider cannot read existing PR content for pr.update_text: keep")
+			}
 			return nil, fmt.Errorf("provider cannot read existing PR content for author-safe template updates")
 		}
 		// Claim after the live read and before composition, so a reattach can
@@ -152,13 +191,44 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		updated := existing
 		// Removing pr.template must not switch an already owned body back to
 		// destructive drafting. Its live author narrative still wins.
-		if template != "" || hasPRAppendixMarkers(live.Body) {
+		// update_text: keep uses that same path when no template is configured.
+		if template != "" || hasPRAppendixMarkers(live.Body) || keepsPRUpdateText(sctx) {
 			if _, err := parsePROwnedBody(live.Body); err != nil {
+				if errors.Is(err, errUnownedLegacyAttestation) && template == "" && keepsPRUpdateText(sctx) {
+					return nil, fmt.Errorf("existing PR has an unowned legacy attestation; explicitly separate its generated evidence from the narrative once before using pr.update_text: keep")
+				}
 				return nil, err
 			}
 			var emptyNarrative string
 			var title string
-			if live.Body == "" && template != "" {
+			if needsPRIntentBrief(sctx) {
+				if template != "" {
+					if live.Body == "" {
+						draft, err := s.draftTemplateNarrative(sctx, branch, baseBranch, baseSHA, template)
+						if err != nil {
+							return nil, err
+						}
+						emptyNarrative = neutralizeAttestationMarkers(provider, draft.Body)
+						title = draft.Title
+					} else {
+						if sctx.Config.PR.TitleFormat != "" {
+							title, err = s.draftConfiguredPRTitle(sctx, branch, baseBranch, baseSHA)
+							if err != nil {
+								return nil, err
+							}
+						} else if err := s.draftPRIntentBrief(sctx, branch, baseBranch, baseSHA); err != nil {
+							return nil, err
+						}
+					}
+				} else if sctx.Config != nil && sctx.Config.PR.TitleFormat != "" {
+					title, err = s.draftConfiguredPRTitle(sctx, branch, baseBranch, baseSHA)
+					if err != nil {
+						return nil, err
+					}
+				} else if err := s.draftPRIntentBrief(sctx, branch, baseBranch, baseSHA); err != nil {
+					return nil, err
+				}
+			} else if live.Body == "" && template != "" {
 				draft, err := s.draftTemplateNarrative(sctx, branch, baseBranch, baseSHA, template)
 				if err != nil {
 					return nil, err
@@ -192,7 +262,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
 				return nil, err
 			}
-			updated, err = host.UpdatePR(ctx, existing, scm.PRContent(content))
+			updated, err = host.UpdatePR(ctx, existing, scm.PRContent{Title: content.Title, Body: content.Body})
 			if err != nil {
 				// A revalidation cycle may already have pushed a repaired head. Its
 				// attestation is part of delivery, so CI must not run after a failed
@@ -223,13 +293,13 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	sctx.Log("creating pull request...")
-	created, err := host.CreatePR(ctx, branch, baseBranch, scm.PRContent(content))
+	created, err := host.CreatePR(ctx, branch, baseBranch, scm.PRContent{Title: content.Title, Body: content.Body})
 	if err != nil {
 		return nil, err
 	}
 	if created == nil || strings.TrimSpace(created.URL) == "" {
-		if template != "" {
-			return nil, fmt.Errorf("templated PR create returned no readable PR identity")
+		if template != "" || keepsPRUpdateText(sctx) {
+			return nil, fmt.Errorf("%s create returned no readable PR identity", createdBodyOwner(template))
 		}
 		if len(sctx.ClosingIssueRefs) > 0 {
 			return nil, fmt.Errorf("verify closing issues: created pull request identity is unavailable")
@@ -240,17 +310,17 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, created.URL); err != nil {
 		slog.Warn("failed to persist PR URL", "run", sctx.Run.ID, "url", created.URL, "err", err)
 	}
-	if template != "" {
+	if template != "" || keepsPRUpdateText(sctx) {
 		reader, ok := host.(scm.PRContentReader)
 		if !ok {
-			return nil, fmt.Errorf("provider cannot verify the created template body")
+			return nil, fmt.Errorf("provider cannot verify the created body for %s", createdBodyOwner(template))
 		}
 		actual, err := reader.GetPRContent(ctx, created)
 		if err != nil {
-			return nil, fmt.Errorf("verify created templated PR: %w", err)
+			return nil, fmt.Errorf("verify created PR for %s: %w", createdBodyOwner(template), err)
 		}
 		if actual.Body != content.Body {
-			return nil, fmt.Errorf("created PR body differs from the proposed template and evidence; refusing successful publication")
+			return nil, fmt.Errorf("created PR body differs from the proposed %s and evidence; refusing successful publication", createdBodyOwner(template))
 		}
 	}
 	if err := verifyClosingIssues(ctx, host, created, sctx); err != nil {
@@ -444,6 +514,11 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 	if err != nil {
 		return prContent{}, err
 	}
+	// A kept draft is already an owned body. Redacting it again would change
+	// bytes the integrity guard just stamped.
+	if keepsPRUpdateText(sctx) {
+		return content, nil
+	}
 	redacted := redactPRContent(content, sctx.WorkDir, nmWorktreesRoot())
 	// Component text is cleaned before it is budgeted, so redaction should not
 	// grow the body. If it does, the body was never fitted to the limit: refuse
@@ -479,10 +554,13 @@ func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		return prContent{}, fmt.Errorf("read final branch diff: %w", err)
 	}
 	inventory := prPromptInventory(sctx, finalDiff, baseSHA)
-	pipelineMD, riskLine, testingMD := s.buildPipelineSection(sctx, provider)
-	if marker := extractPipelineAttestationMarker(pipelineMD); marker != "" &&
-		((bodyLimit > 0 && scm.PRBodyLen(marker) > bodyLimit) || len(marker) > maxPullRequestBodyBytes) {
-		return prContent{}, fmt.Errorf("pipeline attestation exceeds PR body limit")
+	var pipelineMD, riskLine, testingMD string
+	if !keepsPRUpdateText(sctx) {
+		pipelineMD, riskLine, testingMD = s.buildPipelineSection(sctx, provider)
+		if marker := extractPipelineAttestationMarker(pipelineMD); marker != "" &&
+			((bodyLimit > 0 && scm.PRBodyLen(marker) > bodyLimit) || len(marker) > maxPullRequestBodyBytes) {
+			return prContent{}, fmt.Errorf("pipeline attestation exceeds PR body limit")
+		}
 	}
 
 	titleRules := prTitlePromptRules(sctx)
@@ -509,24 +587,32 @@ Diff stat:
 Final diff paths and statuses:
 %s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, titleRules, scopeRules, diffStat, inventory, prDraftIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
 
+	prompt += prIntentBriefPromptSection(sctx)
 	prompt += prBodyBudgetPromptSection(bodyLimit)
 	prompt += agent.MemoryFilesRule
 
+	schema := prContentSchema
+	if needsPRIntentBrief(sctx) {
+		schema = prContentBriefSchema
+	}
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
-		JSONSchema: prContentSchema,
+		JSONSchema: schema,
 		OnChunk:    sctx.LogChunk,
 	})
 	if err != nil {
 		slog.Warn("agent failed for PR content, using fallback", "error", err)
-		fallback, fallbackErr := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit, provider)
+		fallback, fallbackErr := s.fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit, provider)
 		return fallback, fallbackErr
 	}
 
 	var content prContent
-	if result.Output != nil {
+	if result != nil && result.Output != nil {
 		if err := json.Unmarshal(result.Output, &content); err == nil {
+			if err := acceptPRIntentBrief(sctx, content.IntentBrief); err != nil {
+				return prContent{}, err
+			}
 			content.Title = strings.TrimSpace(content.Title)
 			content.Body = strings.TrimSpace(content.Body)
 			content.Body = unwrapNestedPRBody(content.Body)
@@ -541,13 +627,19 @@ Final diff paths and statuses:
 				if content.Title != originalTitle {
 					slog.Warn("normalized agent PR title", "from", originalTitle, "to", content.Title)
 				}
+				if keepsPRUpdateText(sctx) {
+					return s.publishKeptDraft(sctx, provider, content.Title, content.Body, bodyLimit)
+				}
 				content.Body = assembleDraftPRBody(sctx, content.Body, riskLine, testingMD, pipelineMD, bodyLimit, provider)
 				return content, nil
 			}
 		}
 	}
 
-	return fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit, provider)
+	if needsPRIntentBrief(sctx) && strings.TrimSpace(sctx.PublicIntentBrief) == "" {
+		return prContent{}, fmt.Errorf("agent returned no valid configured public Intent brief")
+	}
+	return s.fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit, provider)
 }
 
 func (s *PRStep) draftConfiguredPRTitle(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string) (string, error) {
@@ -572,11 +664,16 @@ Rules:
 
 Final diff paths and statuses:
 %s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, inventory, prDraftIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
+	prompt += prIntentBriefPromptSection(sctx)
 	prompt += agent.MemoryFilesRule
+	schema := prTitleSchema
+	if needsPRIntentBrief(sctx) {
+		schema = prTitleBriefSchema
+	}
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
-		JSONSchema: prTitleSchema,
+		JSONSchema: schema,
 		OnChunk:    sctx.LogChunk,
 	})
 	if err != nil {
@@ -585,6 +682,9 @@ Final diff paths and statuses:
 	var content prContent
 	if result == nil || json.Unmarshal(result.Output, &content) != nil || strings.TrimSpace(content.Title) == "" {
 		return "", fmt.Errorf("agent returned no valid configured PR title")
+	}
+	if err := acceptPRIntentBrief(sctx, content.IntentBrief); err != nil {
+		return "", err
 	}
 	title, err := renderPRTitle(sctx, strings.TrimSpace(content.Title))
 	if err != nil {
@@ -787,7 +887,11 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	if owned && provider == scm.ProviderBitbucket && pipelineMD != "" {
 		pipelineMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, rounds, sctx.Run.HeadSHA, policy) + "\n```"
 	}
-	testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds))
+	compact := true
+	if sctx.Config != nil {
+		compact = sctx.Config.Test.Evidence.Compact
+	}
+	testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds), compact)
 	return pipelineMD, riskLine, testingMD
 }
 
@@ -1670,7 +1774,10 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 	return section + "\n\n" + body
 }
 
-func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) (prContent, error) {
+func (s *PRStep) fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) (prContent, error) {
+	if needsPRIntentBrief(sctx) && strings.TrimSpace(sctx.PublicIntentBrief) == "" {
+		return prContent{}, fmt.Errorf("cannot publish configured public Intent brief without a valid draft")
+	}
 	title, err := renderPRTitle(sctx, "update pull request")
 	if err != nil {
 		return prContent{}, err
@@ -1681,9 +1788,23 @@ func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingM
 		body = "## What Changed\n\nFinal diff unavailable; no complete scope summary was generated."
 	}
 	body = neutralizeAttestationMarkers(provider, body)
+	if keepsPRUpdateText(sctx) {
+		return s.publishKeptDraft(sctx, provider, title, body, bodyLimit)
+	}
 	body = assembleDraftPRBody(sctx, body, riskLine, testingMD, pipelineMD, bodyLimit, provider)
 	return prContent{
 		Title: title,
 		Body:  body,
 	}, nil
+}
+
+func createdBodyOwner(template string) string {
+	if template != "" {
+		return "pr.template"
+	}
+	return "pr.update_text: keep"
+}
+
+func keepsPRUpdateText(sctx *pipeline.StepContext) bool {
+	return sctx != nil && sctx.Config != nil && sctx.Config.PR.KeepsUpdateText()
 }

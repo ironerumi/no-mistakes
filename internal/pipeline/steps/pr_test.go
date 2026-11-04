@@ -2007,7 +2007,7 @@ func TestFallbackPRContentCapsBodyAfterPrependedIntent(t *testing.T) {
 		rounds = append(rounds, fmt.Sprintf("review round %03d - %s", i, strings.Repeat("x", 700)))
 	}
 
-	content, err := fallbackPRContent(
+	content, err := (&PRStep{}).fallbackPRContent(
 		sctx,
 		"A\tinternal/pipeline/steps/pr.go",
 		"✅ Low: generated PR body length guard only",
@@ -2265,11 +2265,12 @@ func TestPRStep_PromptUsesWhatChanged(t *testing.T) {
 
 	env, _ := fakeGH(t, "")
 
-	var capturedPrompt string
+	var capturedPrompt, capturedSchema string
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			capturedPrompt = opts.Prompt
+			capturedSchema = string(opts.JSONSchema)
 			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
@@ -2284,6 +2285,15 @@ func TestPRStep_PromptUsesWhatChanged(t *testing.T) {
 
 	if !strings.Contains(capturedPrompt, "## What Changed") {
 		t.Errorf("expected prompt to instruct agent to write ## What Changed, got:\n%s", capturedPrompt)
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(capturedSchema), &schema); err != nil {
+		t.Fatalf("unparseable PR output schema: %v", err)
+	}
+	if _, ok := schema.Properties["intent_brief"]; ok {
+		t.Errorf("default raw mode changed the PR output schema: %s", capturedSchema)
 	}
 }
 
@@ -2872,7 +2882,7 @@ func TestFallbackPRBodyAttestationDoesNotShadowTheRealOne(t *testing.T) {
 		pipelineAttestationCommentClosingToken
 
 	pipelineMD, riskLine, testingMD := (&PRStep{}).buildPipelineSection(sctx, scm.ProviderGitHub)
-	content, err := fallbackPRContent(sctx, "A\t"+embedded, riskLine, testingMD, pipelineMD, 0, scm.ProviderGitHub)
+	content, err := (&PRStep{}).fallbackPRContent(sctx, "A\t"+embedded, riskLine, testingMD, pipelineMD, 0, scm.ProviderGitHub)
 	if err != nil {
 		t.Fatal(err)
 	}
