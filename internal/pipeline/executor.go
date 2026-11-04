@@ -128,6 +128,13 @@ type Executor struct {
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
 	onPRMerged            func(context.Context, string)
+	// ciObservationTransition wraps CI readiness and PR-state writes at a
+	// daemon-owned synchronization boundary. It is nil in standalone executor
+	// embeddings.
+	ciObservationTransition func(runID string, withdrawal, completes bool, reason string, persist func() error) error
+	ciMonitorLifecycle      func(runID string, active bool)
+	ciWake                  func(runID string) <-chan struct{}
+	handoffPending          func(runID string) bool
 }
 
 // SetOnPRMerged registers a best-effort hook invoked after a merged PR state
@@ -137,6 +144,34 @@ func (e *Executor) SetOnPRMerged(fn func(context.Context, string)) {
 		return
 	}
 	e.onPRMerged = fn
+}
+
+// SetCIObservationTransition serializes CI observations with daemon
+// lifecycle decisions. The transition owns the persist callback's critical
+// section; standalone executors use the direct DB path instead.
+func (e *Executor) SetCIObservationTransition(fn func(runID string, withdrawal, completes bool, reason string, persist func() error) error) {
+	if e == nil {
+		return
+	}
+	e.ciObservationTransition = fn
+}
+
+func (e *Executor) SetCIMonitorLifecycle(fn func(runID string, active bool)) {
+	if e == nil {
+		return
+	}
+	e.ciMonitorLifecycle = fn
+}
+
+func (e *Executor) SetCIWake(fn func(runID string) <-chan struct{}) {
+	if e == nil {
+		return
+	}
+	e.ciWake = fn
+}
+
+func (e *Executor) SetHandoffPending(fn func(runID string) bool) {
+	e.handoffPending = fn
 }
 
 // SetForgeContext configures the immutable provider context used by every
@@ -348,6 +383,18 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		if refusal != nil {
 			e.mu.Unlock()
 			return RespondDispositions{}, refusal
+		}
+		if step == types.StepReview && e.db != nil && e.waitingStepResultID != "" {
+			limit, err := e.reviewFixRoundLimit(e.waitingStepResultID)
+			if err != nil {
+				e.mu.Unlock()
+				return RespondDispositions{}, fmt.Errorf("read Review fix-round budget: %w", err)
+			}
+			if used := reviewFixRoundCount(rounds); limit > 0 && used >= limit {
+				refusal := reviewFixRoundLimitRefusal(used, limit, e.waitingFindings)
+				e.mu.Unlock()
+				return RespondDispositions{}, refusal
+			}
 		}
 		split, err := splitFixResponse(e.waitingFindings, rounds, findingIDs, ignoreFindingIDs)
 		if err != nil {
@@ -1352,6 +1399,28 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	logPath := filepath.Join(logDir, string(stepName)+".log")
 	finalExitCode := 0
 	autoFixLimit := e.autoFixLimit(stepName)
+	maxReviewFixRounds, reviewFixRounds := 0, 0
+	if stepName == types.StepReview {
+		// Resolve once before any agent runs. Legacy/recovered steps retain
+		// their old unbounded contract; existing pins never change.
+		limit := 0
+		if state.roundNum == 0 && !state.fixing && e.config != nil {
+			limit = e.config.Review.MaxFixRounds
+		}
+		if err := e.db.PinReviewMaxFixRounds(sr.ID, limit); err != nil {
+			return false, "", err
+		}
+		var err error
+		maxReviewFixRounds, err = e.reviewFixRoundLimit(sr.ID)
+		if err != nil {
+			return false, "", err
+		}
+		rounds, err := e.db.GetRoundsByStep(sr.ID)
+		if err != nil {
+			return false, "", err
+		}
+		reviewFixRounds = reviewFixRoundCount(rounds)
+	}
 
 	if !state.fixing {
 		if err := e.db.StartStepWithAutoFixLimit(sr.ID, autoFixLimit); err != nil {
@@ -1477,16 +1546,15 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// for, so a finding the operator selected for a fix stays outstanding until
 	// a later round positively verifies it (outcome.ReviewedPaths) or the
 	// operator resolves it at a gate. pendingVerificationIDs names the
-	// selection that later rounds may verify. The loop itself is bounded only by
-	// auto_fix.review (the automatic-round budget) and the human/agent gate,
-	// same as upstream. Repeated user selections remain operator/driver-owned,
-	// rather than receiving a separate code-level round cap. Unused by every other step.
+	// selection that later rounds may verify. auto_fix.review bounds automatic
+	// rounds; opt-in review.max_fix_rounds bounds automatic and explicit fix
+	// rounds together. Unused by every other step.
 	carryFindings := stepName == types.StepReview
 	outstandingFindings := ""
 	var pendingVerificationIDs []string
 	selectedOutstandingIDs := state.selectedOutstandingIDs
 	if carryFindings {
-		outstandingFindings = state.outstandingFindings
+		outstandingFindings = excludeFindingsJSON(state.outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted})
 		pendingVerificationIDs = append([]string(nil), state.selectedOutstandingIDs...)
 		// An answer round is a round type the append-only set was not written
 		// for, and it does NOT earn pending-verification entries. A fix round
@@ -1522,6 +1590,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// the recorder reads, so an operator-configured later-round review role
 		// and the recorded evidence name the same round.
 		stepAgent = &roundStampingAgent{inner: stepAgent, round: func() int { return roundNum + 1 }}
+	}
+	var ciWake <-chan struct{}
+	if e.ciWake != nil {
+		ciWake = e.ciWake(run.ID)
 	}
 	ciReady := run.CIReadyAt != nil
 	ciReadyNoCI := run.CIReadyNoCI
@@ -1576,8 +1648,45 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			touchLogActivity(text, true)
 		},
 		CIReadinessChanged: ciReadinessChanged,
+		CIWake:             ciWake,
 		MarkRunning:        markRunning,
 		OnPRMerged:         e.onPRMerged,
+	}
+	if e.handoffPending != nil {
+		sctx.HandoffPending = func() bool { return e.handoffPending(run.ID) }
+	}
+	sctx.SetCIReadiness = func(ready, declaredNoCI bool) error {
+		declaredNoCI = ready && declaredNoCI
+		persist := func() error {
+			if err := e.db.SetRunCIReadyWithReason(run.ID, ready, declaredNoCI); err != nil {
+				return err
+			}
+			if sctx.CIReadinessChanged != nil {
+				sctx.CIReadinessChanged(ready, declaredNoCI)
+			}
+			return nil
+		}
+		if e.ciObservationTransition != nil {
+			reason := ""
+			if !ready {
+				reason = "CI checks are not green"
+			}
+			return e.ciObservationTransition(run.ID, !ready, ready, reason, persist)
+		}
+		return persist()
+	}
+	sctx.SetPRState = func(state string) error {
+		persist := func() error {
+			return e.db.UpdateRunPRState(run.ID, state)
+		}
+		if e.ciObservationTransition != nil {
+			reason := ""
+			if state != "open" {
+				reason = fmt.Sprintf("PR is %s", state)
+			}
+			return e.ciObservationTransition(run.ID, state != "open", false, reason, persist)
+		}
+		return persist()
 	}
 	if stepName == types.StepReview {
 		BindUncertifiedPipelineRange(sctx)
@@ -1631,9 +1740,15 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// Execute with possible fix loop
 rounds:
 	for {
+		if stepName == types.StepCI && e.ciMonitorLifecycle != nil {
+			e.ciMonitorLifecycle(run.ID, true)
+		}
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
 		outcome, err := e.executeWithCrashRetry(step, sctx, &crashRetriesRemaining)
+		if stepName == types.StepCI && e.ciMonitorLifecycle != nil {
+			e.ciMonitorLifecycle(run.ID, false)
+		}
 		sctx.CoverageContinuation = nil
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
@@ -1642,6 +1757,15 @@ rounds:
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
 			durationMS := executionMS + roundDuration
+			contextCause := context.Cause(ctx)
+			handoff := (errors.Is(err, ErrHandoff) || errors.Is(contextCause, ErrHandoff)) && (contextCause == nil || errors.Is(contextCause, ErrHandoff))
+			if stepName == types.StepCI && handoff {
+				if dbErr := e.db.CompleteStep(sr.ID, 0, durationMS, logPath); dbErr != nil {
+					return false, "", dbErr
+				}
+				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusCompleted), "", "", &durationMS)
+				return false, "", ErrHandoff
+			}
 			// Persist the failure reason to the step's own log file. The error
 			// often carries the only detail of why the step failed (e.g. git
 			// stderr from a rejected push); without this the step log shows the
@@ -1696,6 +1820,9 @@ rounds:
 			// that has nothing to do with it.
 			verificationFindings := dropReviewQuestionFindingsJSON(roundFindings)
 			outstandingFindings = dropReviewQuestionFindingsJSON(outstandingFindings)
+			// The budget notice is re-derived, never a code finding whose
+			// absent file anchor can prevent positive verification.
+			outstandingFindings = excludeFindingsJSON(outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted})
 			// An answer round retracts by naming ids, never by silence - and
 			// ONLY an answer round. A fix round is held to the coverage rule,
 			// so a retraction it claimed would clear a selected finding no
@@ -1717,6 +1844,23 @@ rounds:
 			effectiveFindings = mergeOutstandingFindingsJSON(outstandingFindings, roundFindings, outcome.ReviewedPaths)
 			outstandingFindings = effectiveFindings
 			effectiveFindings = recordWithdrawnFindingsJSON(effectiveFindings, withdrawn)
+		}
+
+		if stepName == types.StepReview && (nextTrigger == "auto_fix" || nextTrigger == "user_fix") {
+			reviewFixRounds++
+		}
+		reviewBudgetExhausted := maxReviewFixRounds > 0 && reviewFixRounds >= maxReviewFixRounds
+		// Only remaining findings carry the notice. A coverage-only park has
+		// none, and complete-coverage requires an empty findings list, so the
+		// notice there would strand a continuation that spends no fix round.
+		if reviewBudgetExhausted && findingsCount(effectiveFindings) > 0 {
+			var err error
+			effectiveFindings, err = appendReviewFixRoundLimit(effectiveFindings, reviewFixRounds, maxReviewFixRounds)
+			if err != nil {
+				return false, "", fmt.Errorf("report exhausted Review budget: %w", err)
+			}
+			outcome.NeedsApproval = true
+			writeLog(reviewFixRoundLimitMessage(reviewFixRounds, maxReviewFixRounds))
 		}
 
 		if effectiveFindings != "" {
@@ -1752,6 +1896,9 @@ rounds:
 			inserted, dbErr = e.db.InsertStepRoundWithRepair(sr.ID, roundNum, roundTrigger, findingsPtr, fixSummaryPtr, outcome.RepairPublished, roundDuration)
 		}
 		if dbErr != nil {
+			if maxReviewFixRounds > 0 {
+				return false, "", fmt.Errorf("persist bounded Review round: %w", dbErr)
+			}
 			currentRoundID = roundInsertID(currentRoundID, inserted, dbErr)
 			slog.Warn("failed to insert step round", "step", stepName, "round", roundNum, "error", dbErr)
 		} else {
@@ -1772,7 +1919,7 @@ rounds:
 		if stepName.IsCustomGate() {
 			autoFixable = gateAutoFixEligible(roundFindings, sctx.PreviousFindings, sctx.DeferredFindings, sctx.Fixing)
 		}
-		if autoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit {
+		if autoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit && !reviewBudgetExhausted {
 			fixableFindings := autoFixableFindingsJSON(roundFindings)
 			if carryFindings {
 				fixableFindings = remapFindingIDsJSON(effectiveFindings, fixableFindings)
@@ -2564,6 +2711,17 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if errors.Is(err, ErrParkedAtShutdown) {
 		return err
 	}
+	causesHandoff := errors.Is(err, ErrHandoff)
+	for _, ctx := range ctxs {
+		if cause := context.Cause(ctx); cause != nil {
+			if !errors.Is(cause, ErrHandoff) {
+				causesHandoff = false
+			}
+		}
+	}
+	if causesHandoff {
+		return e.completeRunWithStatus(run, repo, types.RunHandedOff)
+	}
 	errMsg := err.Error()
 	for _, ctx := range ctxs {
 		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
@@ -2598,6 +2756,11 @@ func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
 	if err != nil {
 		return err
 	}
+	return e.completeRunWithStatus(run, repo, status)
+}
+
+func (e *Executor) completeRunWithStatus(run *db.Run, repo *db.Repo, status types.RunStatus) error {
+	var err error
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
 	if verified {
 		err = e.db.UpdateRunStatusWithVerifiedHead(run.ID, status, verifiedHead)
@@ -2741,13 +2904,13 @@ func (e *Executor) emitRunEvent(eventType ipc.EventType, run *db.Run, repo *db.R
 		Error:  run.Error,
 		PRURL:  run.PRURL,
 	}
-	// A completed run may have a Test exception or CI approval override; the TUI
+	// A successful terminal run may have a Test exception or CI approval override; the TUI
 	// banner reads the reason off the delta (like PRURL) so it never needs a
 	// snapshot to distinguish it from a genuinely green run. Derived from step
 	// rows so both ActionApprove sites (live wait and Resume) are covered.
 	// Gated on the terminal success statuses, not the event type: errorRun emits
 	// the same event for failed/cancelled runs, whose banner never reads it.
-	if run.Status == types.RunCompleted || run.Status == types.RunChecksPassed {
+	if run.Status == types.RunCompleted || run.Status == types.RunChecksPassed || run.Status == types.RunHandedOff {
 		if steps, err := e.db.GetStepsByRun(run.ID); err == nil {
 			ciReason, testReason := completionOverrideReasons(steps)
 			if ciReason != "" {

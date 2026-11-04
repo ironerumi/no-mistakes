@@ -28,7 +28,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
-	"github.com/kunchenguid/no-mistakes/internal/skill"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
@@ -91,10 +90,6 @@ func Run() (retErr error) {
 	}
 	logStartupPhase("environment", environmentStarted)
 
-	// Every installed binary enters here on daemon start, including after an
-	// update or manual replacement. A skill write failure must not block runs.
-	refreshUserSkill()
-
 	// Ensure default config exists, then load it.
 	config.EnsureDefaultGlobalConfig(p.ConfigFile())
 	globalCfg, err := config.LoadGlobal(p.ConfigFile())
@@ -116,12 +111,6 @@ func Run() (retErr error) {
 	logStartupPhase("database", databaseStarted)
 
 	return runWithOptionsLocked(p, d, globalCfg, nil, startupStarted)
-}
-
-func refreshUserSkill() {
-	if _, err := skill.RefreshUser(); err != nil {
-		slog.Warn("refresh user-level agent skill failed", "error", err)
-	}
 }
 
 func prepareDaemonEnvironment() error {
@@ -146,12 +135,18 @@ func prepareDaemonEnvironment() error {
 
 // applyLoginShellEnvironment applies a login-shell probe to the process and
 // keeps the service-supplied NM_HOME authoritative over anything the shell's
-// rc files export.
+// rc files export. A supplied telemetry opt-out also survives the probe, while
+// an enabling value may still be replaced by the shell's opt-out.
 func applyLoginShellEnvironment(apply func(...string) error, nmHome string) error {
+	var excluded []string
 	if nmHome != "" {
-		return apply("NM_HOME")
+		excluded = append(excluded, "NM_HOME")
 	}
-	return apply()
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("NO_MISTAKES_TELEMETRY"))) {
+	case "0", "false", "off":
+		excluded = append(excluded, "NO_MISTAKES_TELEMETRY")
+	}
+	return apply(excluded...)
 }
 
 // logDaemonPathSummary records the effective PATH at daemon startup so that
@@ -1540,6 +1535,20 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
 		if err := mgr.HandleCancel(p.RunID); err != nil {
+			return nil, err
+		}
+		return &ipc.CancelRunResult{OK: true}, nil
+	})
+
+	srv.Handle(ipc.MethodHandoffRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var p ipc.CancelRunParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if err := mgr.HandleHandoff(ctx, p.RunID); err != nil {
 			return nil, err
 		}
 		return &ipc.CancelRunResult{OK: true}, nil
