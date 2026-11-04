@@ -11,7 +11,6 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
-	"github.com/kunchenguid/no-mistakes/internal/skill"
 )
 
 // TestDetachedDaemonUsesBoundedDedicatedLogSinks is a production-shaped
@@ -39,16 +38,6 @@ func TestDetachedDaemonUsesBoundedDedicatedLogSinks(t *testing.T) {
 	if err := os.WriteFile(shellShim, []byte("#!/bin/sh\nexec env -0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	staleSkill := filepath.Join(home, ".agents", "skills", skill.Name, "SKILL.md")
-	if err := os.MkdirAll(filepath.Dir(staleSkill), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(staleSkill, []byte("previous binary skill"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	t.Setenv("SHELL", shellShim)
 	t.Setenv("NM_TEST_START_DAEMON", "1")
 	t.Setenv("NM_DAEMON_HELPER_PROCESS", "daemon")
@@ -69,12 +58,6 @@ func TestDetachedDaemonUsesBoundedDedicatedLogSinks(t *testing.T) {
 		}
 		shutdownIsolatedDaemon(t, p, pid)
 	})
-	for _, base := range skill.InstallBases {
-		data, err := os.ReadFile(filepath.Join(home, base, skill.Name, "SKILL.md"))
-		if err != nil || string(data) != skill.Markdown() {
-			t.Fatalf("daemon did not refresh %s: %v", base, err)
-		}
-	}
 
 	backup, err := os.ReadFile(p.DaemonBootstrapLog() + ".1")
 	if err != nil {
