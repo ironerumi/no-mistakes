@@ -74,9 +74,17 @@ func auditDocumentPointers(ctx context.Context, dir, before, after string) ([]ty
 			if len(targets) == 0 {
 				continue
 			}
+			// An in-place rewrite keeps most of the old line in the new one; only
+			// the tokens the hunk dropped must be preserved by a pointer target.
+			kept := mapTokens(meaningfulTokens(strings.Join(h.added, " ")))
 			var missing []string
 			for _, deleted := range h.removed {
-				tokens := meaningfulTokens(deleted)
+				var tokens []string
+				for _, token := range meaningfulTokens(deleted) {
+					if !kept[token] {
+						tokens = append(tokens, token)
+					}
+				}
 				if len(tokens) < 8 || strings.Contains(strings.ToLower(string(source)), strings.ToLower(strings.TrimSpace(deleted))) {
 					continue
 				}

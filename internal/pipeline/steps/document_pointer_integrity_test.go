@@ -25,6 +25,8 @@ func TestAuditDocumentPointers(t *testing.T) {
 		{"short generic ignored", "See [deployment](owner.md).", "unrelated", 0},
 		{"missing target", "See [deployment](missing.md).", "", 1},
 		{"pointer in another hunk", "Replacement without a pointer.", "", 0},
+		{"in-place rewrite keeps the rule", strings.Replace(rule, "do not", "never", 1) + " Details: see [deployment](owner.md).", "Unrelated owner text.", 0},
+		{"rewrite drops the rule", "Deploy halves are described in [deployment](owner.md) now.", "Unrelated owner text.", 1},
 		{"external link", "See [deployment](https://example.com/owner.md).", "", 0},
 	}
 	for _, tc := range cases {
