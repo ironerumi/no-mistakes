@@ -74,9 +74,18 @@ func auditDocumentPointers(ctx context.Context, dir, before, after string) ([]ty
 			if len(targets) == 0 {
 				continue
 			}
+			// An in-place rewrite keeps most of the old line in the new one; only
+			// the tokens the hunk dropped must be preserved by a pointer target.
+			kept := mapTokens(meaningfulTokens(strings.Join(h.added, " ")))
 			var missing []string
 			for _, deleted := range h.removed {
-				tokens := meaningfulTokens(deleted)
+				original := meaningfulTokens(deleted)
+				var tokens []string
+				for _, token := range original {
+					if !kept[token] {
+						tokens = append(tokens, token)
+					}
+				}
 				if len(tokens) < 8 || strings.Contains(strings.ToLower(string(source)), strings.ToLower(strings.TrimSpace(deleted))) {
 					continue
 				}
@@ -89,7 +98,7 @@ func auditDocumentPointers(ctx context.Context, dir, before, after string) ([]ty
 					if err != nil {
 						return nil, fmt.Errorf("read pointer target %q: %w", target, err)
 					}
-					if pointerPreserved(tokens, string(data)) {
+					if pointerPreserved(original, tokens, string(data)) {
 						preserved = true
 						break
 					}
@@ -222,7 +231,7 @@ func meaningfulTokens(s string) []string {
 	return strings.FieldsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) })
 }
 
-func pointerPreserved(deleted []string, target string) bool {
+func pointerPreserved(original, deleted []string, target string) bool {
 	// Lines and short adjacent windows preserve wrapped sentences without
 	// allowing unrelated claims from distant sections to combine into a match.
 	lines := strings.Split(target, "\n")
@@ -232,7 +241,7 @@ func pointerPreserved(deleted []string, target string) bool {
 			if len(window) > 120 {
 				break
 			}
-			if tokenMatch(deleted, window) {
+			if containsTokens(original, window) || tokenMatch(deleted, window) {
 				return true
 			}
 		}
@@ -240,7 +249,7 @@ func pointerPreserved(deleted []string, target string) bool {
 	return false
 }
 
-func tokenMatch(needle, hay []string) bool {
+func containsTokens(needle, hay []string) bool {
 	for i := 0; i+len(needle) <= len(hay); i++ {
 		same := true
 		for j := range needle {
@@ -252,6 +261,13 @@ func tokenMatch(needle, hay []string) bool {
 		if same {
 			return true
 		}
+	}
+	return false
+}
+
+func tokenMatch(needle, hay []string) bool {
+	if containsTokens(needle, hay) {
+		return true
 	}
 	set := make(map[string]bool)
 	for _, t := range needle {

@@ -15,17 +15,22 @@ import (
 
 func TestAuditDocumentPointers(t *testing.T) {
 	const rule = "Both halves run the same body, .github/scripts/fleet-deploy-app.sh; do not write a second copy into a workflow."
+	const repeatedRule = "Deploy uses the shared lock; deploy releases the shared lock."
 	cases := []struct {
-		name, replacement, target string
-		want                      int
+		name, original, replacement, target string
+		want                                int
 	}{
-		{"exact containment", "See [deployment](owner.md).", "Preconditions: " + rule, 0},
-		{"reworded above threshold", "See [deployment](owner.md).", "Both halves run the same body, .github/scripts/fleet-deploy-app.sh; never write a second copy into a workflow.", 0},
-		{"below threshold", "See [deployment](owner.md).", "Both halves run separate bodies in different places.", 1},
-		{"short generic ignored", "See [deployment](owner.md).", "unrelated", 0},
-		{"missing target", "See [deployment](missing.md).", "", 1},
-		{"pointer in another hunk", "Replacement without a pointer.", "", 0},
-		{"external link", "See [deployment](https://example.com/owner.md).", "", 0},
+		{"exact containment", rule, "See [deployment](owner.md).", "Preconditions: " + rule, 0},
+		{"reworded above threshold", rule, "See [deployment](owner.md).", "Both halves run the same body, .github/scripts/fleet-deploy-app.sh; never write a second copy into a workflow.", 0},
+		{"below threshold", rule, "See [deployment](owner.md).", "Both halves run separate bodies in different places.", 1},
+		{"short generic ignored", "A short note.", "See [deployment](owner.md).", "unrelated", 0},
+		{"missing target", rule, "See [deployment](missing.md).", "", 1},
+		{"pointer in another hunk", rule, "Replacement without a pointer.", "", 0},
+		{"in-place rewrite keeps the rule", rule, strings.Replace(rule, "do not", "never", 1) + " Details: see [deployment](owner.md).", "Unrelated owner text.", 0},
+		{"rewrite drops the rule", rule, "Deploy halves are described in [deployment](owner.md) now.", "Unrelated owner text.", 1},
+		{"exact containment after token subtraction", repeatedRule, "See [deploy](owner.md).", repeatedRule, 0},
+		{"loss after token subtraction", repeatedRule, "See [deploy](owner.md).", "Unrelated owner text.", 1},
+		{"external link", rule, "See [deployment](https://example.com/owner.md).", "", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -34,10 +39,7 @@ func TestAuditDocumentPointers(t *testing.T) {
 			gitCmd(t, dir, "config", "user.email", "test@example.com")
 			gitCmd(t, dir, "config", "user.name", "Test")
 			source := filepath.Join(dir, "guide.md")
-			original := rule + "\n\n\n\n\n\n\n\n\nA short note.\n"
-			if tc.name == "short generic ignored" {
-				original = "A short note.\n"
-			}
+			original := tc.original + "\n\n\n\n\n\n\n\n\nA short note.\n"
 			if err := os.WriteFile(source, []byte(original), 0644); err != nil {
 				t.Fatal(err)
 			}
