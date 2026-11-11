@@ -15,6 +15,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // Without --closes the body never gains a closing reference, even though
@@ -24,7 +25,7 @@ func TestPRStep_NeverInfersClosingReferenceFromIntent(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	env, _ := fakeGH(t, "")
 	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.UserIntent = "Implement issue #95"
 
@@ -44,7 +45,7 @@ func TestPRStep_NeutralizesClosingReferenceInPublishedIntent(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	env, _ := fakeGH(t, "")
 	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.UserIntent = "Refactor X\nFixes #12"
 
@@ -68,7 +69,7 @@ func TestPRStep_NeutralizesClosingReferenceInDraftedNarrative(t *testing.T) {
 		payload := json.RawMessage(`{"title":"add widget","body":"## What Changed\n\n- add widget\n\nCloses #7"}`)
 		return &agent.Result{Output: payload}, nil
 	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 
 	if _, err := (&PRStep{}).Execute(sctx); err != nil {
@@ -91,7 +92,7 @@ func TestPRStep_ClosesRendersOnlyInIssuesSection(t *testing.T) {
 		payload := json.RawMessage(`{"title":"add widget","body":"## What Changed\n\n- add widget\n\nCloses #95"}`)
 		return &agent.Result{Output: payload}, nil
 	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"95"}); err != nil {
 		t.Fatal(err)
@@ -251,7 +252,7 @@ func TestPRStep_ClosesFailsInsteadOfSkippingWhenHostUnavailable(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/closes=%v", tc.name, refs), func(t *testing.T) {
 				t.Parallel()
 				dir, baseSHA, headSHA := setupGitRepo(t)
-				sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+				sctx := newPRTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
 				tc.setup(t, sctx)
 				if refs != nil {
 					if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, refs); err != nil {
@@ -298,7 +299,7 @@ func TestPRStep_OwnRepositoryQualifiedReferenceRendersOnce(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	env, _ := fakeGH(t, "")
 	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"95", "Test/Repo#95", "other/repo#95"}); err != nil {
 		t.Fatal(err)
@@ -547,7 +548,7 @@ func TestClaimClosingIssueRefsProviderBoundaries(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dir, baseSHA, headSHA := setupGitRepo(t)
-			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+			sctx := newPRTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
 			sctx.Repo.UpstreamURL = tc.upstream
 			if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, tc.refs); err != nil {
 				t.Fatal(err)
@@ -589,13 +590,14 @@ func TestPRStep_GitLabClosesRendersAndVerifiesOnTheMR(t *testing.T) {
 		payload := json.RawMessage(`{"title":"fix: implement the widget","body":"## What Changed\n\n- implement the widget\n\nImplements #95"}`)
 		return &agent.Result{Output: payload}, nil
 	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.Repo.UpstreamURL = "https://gitlab.com/test/repo.git"
 	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"95", "other/subgroup/project#7"}); err != nil {
 		t.Fatal(err)
 	}
 
+	assertNotice := capturePRProofNotice(t, sctx, "gitlab")
 	step := &PRStep{}
 	if _, err := step.Execute(sctx); err != nil {
 		t.Fatal(err)
@@ -614,6 +616,7 @@ func TestPRStep_GitLabClosesRendersAndVerifiesOnTheMR(t *testing.T) {
 		t.Fatal("the created merge request carried no description")
 	}
 	body := *published.Description
+	assertNotice(body)
 	if !strings.Contains(body, "## Issues\n\nCloses #95\nCloses other/subgroup/project#7") {
 		t.Fatalf("published body lacks the requested closing references:\n%s", body)
 	}
@@ -642,7 +645,7 @@ func TestPRStep_GitHubClosesKeepsGitHubNeutralization(t *testing.T) {
 		payload := json.RawMessage(`{"title":"fix: implement the widget","body":"## What Changed\n\n- implement the widget\n\nImplements #95"}`)
 		return &agent.Result{Output: payload}, nil
 	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"95"}); err != nil {
 		t.Fatal(err)
@@ -704,5 +707,29 @@ func TestGitLabClosingCoverageRejectsTabs(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// A supplied description is narrative like any other: a closing keyword in it
+// is neutralized, and only --closes publishes a live reference.
+func TestPRStep_SuppliedBodyClosesOnlyThroughTheIssuesSection(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	sctx := newPRTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	insertCompletedStep(t, sctx, types.StepReview, "", "")
+	title, body := "Add widget", "Adds the widget.\n\nCloses #95\n"
+	sctx.Run.PRTitle, sctx.Run.PRBody = &title, &body
+	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"95"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	published := readPRBodyFile(t, bodyFile)
+	if got := strings.Join(extractClosingKeywordLines(published, githubClosingGrammar), "|"); got != "Closes #95" || !strings.Contains(published, "## Issues\n\nCloses #95") {
+		t.Fatalf("closing lines = %q, want only the Issues section's Closes #95:\n%s", got, published)
 	}
 }
