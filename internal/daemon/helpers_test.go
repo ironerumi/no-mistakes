@@ -46,6 +46,14 @@ func TestMain(m *testing.M) {
 			os.Exit(2)
 		}
 		os.Exit(0)
+	case "restartable":
+		// RunRestartable as `daemon run` calls it: a scheduled restart
+		// executes this test binary again with the same environment.
+		if err := RunRestartable(); err != nil {
+			_, _ = os.Stderr.WriteString(err.Error() + "\n")
+			os.Exit(2)
+		}
+		os.Exit(0)
 	case "bootstrap-sink":
 		if err := RunBootstrapLogSink(); err != nil {
 			_, _ = os.Stderr.WriteString(err.Error() + "\n")
@@ -530,7 +538,7 @@ func waitForRunTerminalState(t *testing.T, d *db.DB, runID string) *db.Run {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if run != nil && run.Status.Terminal() {
+		if run != nil && (run.Status == types.RunCompleted || run.Status == types.RunFailed) {
 			return run
 		}
 		time.Sleep(50 * time.Millisecond)

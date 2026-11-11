@@ -28,6 +28,7 @@ type Host struct {
 	host                string // repo's GitHub hostname; scopes the auth check
 	repo                string // "owner/name" slug for --repo; empty when unknown
 	forkOwner           string // fork owner for cross-repository PR heads
+	forkRepo            string // exact source repository for live-head proof
 	requiredReviews     []string
 	requiredReviewAppID int64
 	draft               bool // open created PRs as drafts (gh pr create --draft)
@@ -66,12 +67,14 @@ func (h *Host) WithRequiredReviews(reviewers []string, appID int64) *Host {
 }
 
 // NewWithFork builds a Host that opens PRs on repo using forkRepo as the head
-// repository owner. forkRepo is an "owner/name" slug; only the owner is needed
-// because gh pr create expects --head <owner>:<branch>. host is optional; see
+// repository owner. forkRepo is an "owner/name" slug: creation uses its owner
+// for --head <owner>:<branch>, and live-head proof checks the complete slug.
+// host is optional; see
 // New for its role in scoping the auth check. draft opens created PRs as drafts.
 func NewWithFork(cmd CmdFactory, cliAvailable func() bool, host, repo, forkRepo string, draft bool) *Host {
 	h := New(cmd, cliAvailable, host, repo)
 	h.forkOwner = repoOwner(forkRepo)
+	h.forkRepo = forkRepo
 	h.draft = draft
 	return h
 }
@@ -639,9 +642,9 @@ func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check
 		if cursor != "" {
 			args = append(args, "-F", "cursor="+cursor)
 		}
-		out, err := h.cmd(ctx, "gh", args...).CombinedOutput()
+		out, detail, err := stdoutOnly(h.cmd(ctx, "gh", args...))
 		if err != nil {
-			return nil, fmt.Errorf("gh api checks for head commit: %s: %w", strings.TrimSpace(string(out)), err)
+			return nil, fmt.Errorf("gh api checks for head commit: %s: %w", detail, err)
 		}
 		var response struct {
 			Data struct {
@@ -916,9 +919,9 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 		"-f", "per_page=100",
 		"--paginate", "--slurp",
 	)
-	out, err := h.cmd(ctx, "gh", args...).CombinedOutput()
+	out, detail, err := stdoutOnly(h.cmd(ctx, "gh", args...))
 	if err != nil {
-		return nil, fmt.Errorf("gh api workflow runs for head commit: %s: %w", strings.TrimSpace(string(out)), err)
+		return nil, fmt.Errorf("gh api workflow runs for head commit: %s: %w", detail, err)
 	}
 	type workflowRun struct {
 		ID           int64  `json:"id"`

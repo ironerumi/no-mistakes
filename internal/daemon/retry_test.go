@@ -201,6 +201,7 @@ type retryFixture struct {
 type retryFixtureOptions struct {
 	beforeSource func(t *testing.T, f *retryFixture)
 	profile      *agentcfg.PiProfile
+	reviewer     *agentcfg.ReviewerProfile
 	plan         *verificationplan.Snapshot
 	failInTest   bool
 	twoHop       bool
@@ -211,6 +212,8 @@ type retryFixtureOptions struct {
 	invocation db.AgentInvocation
 	// findings is the findings JSON the carried review round recorded.
 	findings *string
+	// prText is the caller-supplied PR text the failed source run carried.
+	prText db.RunPRText
 }
 
 func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
@@ -226,14 +229,18 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 		opts.beforeSource(t, f)
 		submitted = f.submitted
 	}
-	var profiles []*agentcfg.PiProfile
+	var profiles []agentcfg.RunSelection
 	if opts.profile != nil {
 		profiles = append(profiles, opts.profile)
 	}
-	source, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "main", submitted, submitted, &db.RunIntent{Summary: "keep it", Source: db.RunIntentSourceAgent, Score: 1}, "", "", "", "", false, opts.plan, profiles...)
+	if opts.reviewer != nil {
+		profiles = append(profiles, opts.reviewer)
+	}
+	source, err := d.InsertRunWithPRText(repo.ID, "main", submitted, submitted, &db.RunIntent{Summary: "keep it", Source: db.RunIntentSourceAgent, Score: 1}, "", "", "", "", false, opts.plan, opts.prText, profiles...)
 	if err != nil {
 		t.Fatal(err)
 	}
+	bindFixtureCommitIdentity(t, d, source.ID)
 	for _, name := range []types.StepName{types.StepRebase, types.StepReview, types.StepTest} {
 		sr, err := d.InsertStepResult(source.ID, name)
 		if err != nil {
@@ -296,6 +303,13 @@ func (f *retryFixture) continuationOf(t *testing.T, source *db.Run) *db.Run {
 	}
 	next, err := f.d.InsertRunWithIntentAndLaunchNonce(f.repo.ID, "main", f.submitted, f.submitted, &db.RunIntent{Summary: "keep it", Source: db.RunIntentSourceAgent, Score: 1}, "", "", "", "", false, nil)
 	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := f.d.RunCommitIdentity(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.BindRunCommitIdentity(next.ID, identity); err != nil {
 		t.Fatal(err)
 	}
 	for _, row := range sourceRows {
@@ -669,6 +683,19 @@ func TestRetryStartsWhenEveryProofHolds(t *testing.T) {
 	}
 	if got := f.executions.Load(); got != 2 {
 		t.Fatalf("executed %d steps, want review and test only", got)
+	}
+}
+
+func TestRetryInheritsTheSuppliedPRText(t *testing.T) {
+	text := db.RunPRText{Title: "Add widget", Body: "Our words.\n"}
+	f := newRetryFixture(t, retryFixtureOptions{prText: text})
+	result, err := f.retry(t, f.source.ID)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	run := waitForRunTerminalState(t, f.d, result.RunID)
+	if run.PRTitle == nil || *run.PRTitle != text.Title || run.PRBody == nil || *run.PRBody != text.Body {
+		t.Fatalf("retried run PR text = %v / %v", run.PRTitle, run.PRBody)
 	}
 }
 

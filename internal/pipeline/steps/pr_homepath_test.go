@@ -298,7 +298,7 @@ func TestPRStep_ExecuteRedactsAbsoluteHomePathsBeforePublishing(t *testing.T) {
 			return &agent.Result{Output: json.RawMessage(payload)}, nil
 		},
 	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.EvidenceDir = fixtureEvidenceDir
 
@@ -383,7 +383,7 @@ func buildHomePathLeakPRContentWithLimit(t *testing.T, tc homePathLeakCase, body
 			return &agent.Result{Output: json.RawMessage(payload)}, nil
 		},
 	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = tc.userIntent
 	if tc.evidenceDir != "" {
 		sctx.EvidenceDir = tc.evidenceDir
@@ -612,7 +612,7 @@ func TestPRStep_BuildPRContentRedactsRunWorktreePaths(t *testing.T) {
 			return &agent.Result{Output: json.RawMessage(`{"title":"fix: evidence paths","body":"## What Changed\n\n- evidence paths"}`)}, nil
 		},
 	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	if err := os.MkdirAll(sctx.EvidenceDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -640,5 +640,28 @@ func TestPRStep_BuildPRContentRedactsRunWorktreePaths(t *testing.T) {
 		if !strings.Contains(content.Body, want) {
 			t.Errorf("expected %q in PR body:\n%s", want, content.Body)
 		}
+	}
+}
+
+// "Verbatim" stops at the publication boundary: a supplied description is
+// redacted like every other source before its integrity guard is stamped.
+func TestPRStep_SuppliedBodyIsRedactedBeforePublishing(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newPRTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	insertCompletedStep(t, sctx, types.StepReview, "", "")
+	title, body := "Keep evidence out of the worktree", "Evidence now lands under "+fixtureEvidenceDir+".\n"
+	sctx.Run.PRTitle, sctx.Run.PRBody = &title, &body
+	got, err := (&PRStep{}).buildSuppliedPRContent(sctx, "feature", "main", baseSHA, "", scm.ProviderGitHub, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, needle := range homePathLeakNeedles {
+		if strings.Contains(got.Body, needle) {
+			t.Fatalf("supplied body leaked %q:\n%s", needle, got.Body)
+		}
+	}
+	if !strings.Contains(got.Body, "Evidence now lands under "+fixtureRedactedPath(".no-mistakes", "evidence", "run-1")) {
+		t.Fatalf("supplied body was not redacted in place:\n%s", got.Body)
 	}
 }

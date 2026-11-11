@@ -181,7 +181,7 @@ func TestPRStep_BriefPublicationPolicySkipsGeneration(t *testing.T) {
 		}
 		return &agent.Result{Output: json.RawMessage(`{"title":"feat: add validation","body":"## What Changed\n\n- Add validation"}`)}, nil
 	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = source
 	sctx.Config.PR.Intent.Format = "brief"
 	publish := false
@@ -206,7 +206,7 @@ func TestPRStep_OwnedAppendixDraftsBriefWithoutReplacingAuthorNarrative(t *testi
 		}
 		return &agent.Result{Output: json.RawMessage(`{"intent_brief":{"goal":"Keep the release check reliable","why":["Catch invalid changes early"]}}`)}, nil
 	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = source
 	sctx.Config.PR.Intent.Format = "brief"
 	sctx.Config.PR.Intent.Sections = []string{"why"}
@@ -238,7 +238,7 @@ func TestPRStep_ExistingPRUpdateAddsBriefWithoutReplacingNarrative(t *testing.T)
 	ag := &mockAgent{name: "test", runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
 		return &agent.Result{Output: json.RawMessage(`{"title":"feat: preserve the existing narrative","body":"## What Changed\n\n- Preserve the author's existing explanation"}`)}, nil
 	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = createEnv
 	sctx.UserIntent = source
 	sctx.Config.PR.UpdateText = config.PRUpdateTextKeep
@@ -289,7 +289,7 @@ func TestPRStep_ConfiguredTitleTurnAlsoReturnsBrief(t *testing.T) {
 		}
 		return &agent.Result{Output: json.RawMessage(`{"title":"improve reliability","intent_brief":{"goal":"Improve reliability","scope":["Use the existing validation path"]}}`)}, nil
 	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = source
 	sctx.Config.PR.Intent.Format = "brief"
 	sctx.Config.PR.Intent.Sections = []string{"scope"}
@@ -314,7 +314,7 @@ func TestPRStep_BriefOmissionSkipsGenerationAndPublication(t *testing.T) {
 		}
 		return &agent.Result{Output: json.RawMessage(`{"title":"feat: add validation","body":"## What Changed\n\n- Add validation"}`)}, nil
 	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = source
 	sctx.Run.OmitIntent = true
 	sctx.Config.PR.Intent.Format = "brief"
@@ -335,7 +335,7 @@ func TestPRStep_BriefModeFailsClosedWithoutStructuredOutput(t *testing.T) {
 	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 		return &agent.Result{Output: json.RawMessage(`{"title":"feat: add validation","body":"## What Changed\\n\\n- Add validation"}`)}, nil
 	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = source
 	sctx.Config.PR.Intent.Format = "brief"
 	if _, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0); err == nil || strings.Contains(err.Error(), source) {
@@ -345,7 +345,32 @@ func TestPRStep_BriefModeFailsClosedWithoutStructuredOutput(t *testing.T) {
 
 func TestFallbackPRContentRefusesRawIntentInBriefMode(t *testing.T) {
 	sctx := &pipeline.StepContext{Config: &config.Config{PR: config.PR{Intent: config.PRIntent{Format: "brief"}}}, UserIntent: "private raw intent"}
-	if _, err := (&PRStep{}).fallbackPRContent(sctx, "", "", "", "", 0, scm.ProviderGitHub); err == nil || strings.Contains(err.Error(), "private raw intent") {
+	if _, err := (&PRStep{}).fallbackPRContent(sctx, "", "", "", "", "", 0, scm.ProviderGitHub); err == nil || strings.Contains(err.Error(), "private raw intent") {
 		t.Fatalf("fallback error = %v, want a non-disclosing fail-closed error", err)
+	}
+}
+
+func TestPRStep_SuppliedTextDraftsOnlyTheBrief(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: json.RawMessage(`{"intent_brief":{"goal":"Keep the release check reliable","why":["Catch invalid changes early"]}}`)}, nil
+	}}
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.UserIntent = "Keep the release check reliable."
+	sctx.Config.PR.Intent.Format = "brief"
+	sctx.Config.PR.Intent.Sections = []string{"why"}
+	insertCompletedStep(t, sctx, types.StepReview, "", "")
+	title, body := "Supplied title", "Supplied narrative."
+	sctx.Run.PRTitle, sctx.Run.PRBody = &title, &body
+	got, err := (&PRStep{}).buildSuppliedPRContent(sctx, "feature", "main", baseSHA, "", scm.ProviderGitHub, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 || string(ag.calls[0].JSONSchema) != string(prIntentBriefOnlySchema) {
+		t.Fatalf("supplied text must draft only the brief: calls=%d", len(ag.calls))
+	}
+	if got.Title != title || !strings.HasPrefix(got.Body, body+"\n\n") || !strings.Contains(got.Body, "## Intent\n\nKeep the release check reliable\n\n### Why\n- Catch invalid changes early") {
+		t.Fatalf("content = %+v", got)
 	}
 }
