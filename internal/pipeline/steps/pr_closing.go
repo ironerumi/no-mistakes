@@ -136,18 +136,19 @@ func closingGrammarFor(provider scm.Provider) closingGrammar {
 func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 	seen := map[string]struct{}{}
 	var lines []string
-	var fence markdownFence
-	var htmlCode string
-	for _, raw := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+	var code closingCodeContext
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	offset := 0
+	for _, raw := range strings.Split(body, "\n") {
+		following := body[min(offset+len(raw)+1, len(body)):]
+		offset += len(raw) + 1
 		if grammar.codeAware {
-			inFence := fence.marker != 0
-			fence.consume(raw)
-			if inFence || fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+			if code.skipLine(raw) {
 				continue
 			}
-			inHTMLCode := htmlCode != ""
-			rewriteOutsideCode(raw, &htmlCode, func(s string) string { return s })
-			if inHTMLCode || htmlCode != "" {
+			inCode := code.html != "" || code.inline != 0
+			rewriteOutsideCode(raw, &code, following, func(s string) string { return s })
+			if inCode || code.html != "" || code.inline != 0 {
 				continue
 			}
 		}
@@ -189,15 +190,15 @@ func neutralizeGitHubClosingReferences(s string, keep func(target string) bool) 
 		})
 	}
 	lines := strings.Split(s, "\n")
-	var fence markdownFence
-	var htmlCode string
+	var code closingCodeContext
+	offset := 0
 	for i, raw := range lines {
-		inFence := fence.marker != 0
-		fence.consume(raw)
-		if inFence || fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+		following := s[min(offset+len(raw)+1, len(s)):]
+		offset += len(raw) + 1
+		if code.skipLine(raw) {
 			continue
 		}
-		lines[i] = rewriteOutsideCode(raw, &htmlCode, rewrite)
+		lines[i] = rewriteOutsideCode(raw, &code, following, rewrite)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -244,12 +245,63 @@ var (
 	closingTargetOnlyPattern  = regexp.MustCompile(`(?i)^(?:` + githubClosingTargetInText + `)$`)
 )
 
+type closingCodeContext struct {
+	fence  markdownFence
+	html   string
+	inline int
+}
+
+func (c *closingCodeContext) skipLine(raw string) bool {
+	if c.html != "" || c.inline != 0 {
+		return false
+	}
+	inFence := c.fence.marker != 0
+	c.fence.consume(raw)
+	return inFence || c.fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ")
+}
+
+func closingBacktick(text string, start, width int) int {
+	for i := start; i < len(text); {
+		if text[i] != '`' {
+			i++
+			continue
+		}
+		n := 1
+		for i+n < len(text) && text[i+n] == '`' {
+			n++
+		}
+		if n == width {
+			return i
+		}
+		i += n
+	}
+	return -1
+}
+
 // rewriteOutsideCode applies rewrite to the parts of line outside inline code
 // spans and HTML <code>/<pre> elements (open carries an element across
 // lines). A backtick run without a matching closing run is literal text. A
 // code span holding nothing but the target of the closing keyword
 // right before it is unwrapped into the surrounding text instead of kept.
-func rewriteOutsideCode(line string, open *string, rewrite func(string) string) string {
+func rewriteOutsideCode(line string, code *closingCodeContext, following string, rewrite func(string) string) string {
+	if code.html != "" {
+		for _, m := range htmlCodeTagPattern.FindAllStringSubmatchIndex(line, -1) {
+			if m[3] > m[2] && strings.EqualFold(line[m[4]:m[5]], code.html) {
+				code.html = ""
+				return line[:m[1]] + rewriteOutsideCode(line[m[1]:], code, following, rewrite)
+			}
+		}
+		return line
+	}
+	if code.inline != 0 {
+		closing := closingBacktick(line, 0, code.inline)
+		if closing < 0 {
+			return line
+		}
+		end := closing + code.inline
+		code.inline = 0
+		return line[:end] + rewriteOutsideCode(line[end:], code, following, rewrite)
+	}
 	var b strings.Builder
 	pending := ""
 	text := 0
@@ -262,39 +314,35 @@ func rewriteOutsideCode(line string, open *string, rewrite func(string) string) 
 		for i+n < len(line) && line[i+n] == '`' {
 			n++
 		}
-		closing := -1
-		for j := i + n; j < len(line); {
-			if line[j] != '`' {
-				j++
-				continue
-			}
-			m := 1
-			for j+m < len(line) && line[j+m] == '`' {
-				m++
-			}
-			if m == n {
-				closing = j
-				break
-			}
-			j += m
+		segment := pending + line[text:i]
+		if endsInsideHTMLCode(segment, code.html) {
+			b.WriteString(outsideHTMLCode(segment, &code.html, rewrite))
+			b.WriteString(rewriteOutsideCode(line[i:], code, following, rewrite))
+			return b.String()
 		}
+		closing := closingBacktick(line, i+n, n)
 		if closing < 0 {
+			if closingBacktick(following, 0, n) >= 0 {
+				b.WriteString(outsideHTMLCode(segment, &code.html, rewrite))
+				b.WriteString(line[i:])
+				code.inline = n
+				return b.String()
+			}
 			i += n
 			continue
 		}
-		segment := pending + line[text:i]
 		content := strings.TrimSpace(line[i+n : closing])
-		if closingTargetOnlyPattern.MatchString(content) && closingKeywordTailPattern.MatchString(segment) && !endsInsideHTMLCode(segment, *open) {
+		if closingTargetOnlyPattern.MatchString(content) && closingKeywordTailPattern.MatchString(segment) {
 			pending = segment + content
 		} else {
-			b.WriteString(outsideHTMLCode(segment, open, rewrite))
+			b.WriteString(outsideHTMLCode(segment, &code.html, rewrite))
 			b.WriteString(line[i : closing+n])
 			pending = ""
 		}
 		i = closing + n
 		text = i
 	}
-	b.WriteString(outsideHTMLCode(pending+line[text:], open, rewrite))
+	b.WriteString(outsideHTMLCode(pending+line[text:], &code.html, rewrite))
 	return b.String()
 }
 

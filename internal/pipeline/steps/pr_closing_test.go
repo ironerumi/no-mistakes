@@ -696,6 +696,36 @@ func TestHTMLCodeClosingCoverage(t *testing.T) {
 	}
 }
 
+func TestClosingCodeContextCoverage(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{
+		"Example: `literal\nCloses #333\nend`",
+		"Example: ``literal\nCloses #333\nend``",
+		"Example: `literal\n<pre>\n```\nCloses #333\n    end`",
+		"<pre>\nCloses #333\n    </pre>",
+		"<code>\nCloses #333\n\t</code>",
+		"<pre>\n```\nCloses #333\n    </pre>",
+		"<code>\n`literal\nCloses #333\n    </code>",
+	} {
+		t.Run(body, func(t *testing.T) {
+			sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"333"}}
+			if err := verifyClosingIssuesInBody(body, sctx); err == nil {
+				t.Fatal("code-only declaration must not satisfy GitHub closing coverage")
+			}
+			section := issuesSection(sctx, body)
+			if section != "## Issues\n\nCloses #333" {
+				t.Fatalf("code-only declaration suppressed the live Issues entry: %q", section)
+			}
+			if err := verifyClosingIssuesInBody(appendIssuesSection(body, section), sctx); err != nil {
+				t.Fatalf("live declaration after code did not verify: %v", err)
+			}
+		})
+	}
+	if err := verifyClosingIssuesInBody("Example: `unmatched\nCloses #333", &pipeline.StepContext{ClosingIssueRefs: []string{"333"}}); err != nil {
+		t.Fatalf("unmatched literal backtick hid a live declaration: %v", err)
+	}
+}
+
 func TestPRStep_HTMLCodeReferenceDoesNotSuppressIssues(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -813,6 +843,13 @@ func TestNeutralizeGitHubClosingReferencesUnwrapsCodeWrappedTarget(t *testing.T)
 		{"other longer span kept", "Closes `` #333 now ``", "Closes `` #333 now ``"},
 		{"fenced", "```\nCloses `#333`\n```", "```\nCloses `#333`\n```"},
 		{"HTML code", "<code>Fixes `#334`</code> then Fixes `#334`", "<code>Fixes `#334`</code> then Refs #334"},
+		{"multiline span", "Example: `literal\nCloses #334\nend`\nCloses `#334`", "Example: `literal\nCloses #334\nend`\nRefs #334"},
+		{"multiline double span", "Example: ``literal\nCloses #334\nend`` then Closes `` #333 ``", "Example: ``literal\nCloses #334\nend`` then Closes #333"},
+		{"indented HTML close", "<pre>\nCloses #334\n    </pre>\nCloses `#334`", "<pre>\nCloses #334\n    </pre>\nRefs #334"},
+		{"HTML precedence over fence", "<code>\n```\nCloses #334\n\t</code>\nCloses `#334`", "<code>\n```\nCloses #334\n\t</code>\nRefs #334"},
+		{"HTML precedence over backtick", "<pre>\n`literal\nCloses #334\n    </pre>\nCloses `#334`", "<pre>\n`literal\nCloses #334\n    </pre>\nRefs #334"},
+		{"inline precedence over HTML and fence", "Example: `literal\n<pre>\n```\nCloses #334\n    end`\nCloses `#334`", "Example: `literal\n<pre>\n```\nCloses #334\n    end`\nRefs #334"},
+		{"unmatched backtick", "Example: `literal\nCloses #334", "Example: `literal\nRefs #334"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := neutralizeGitHubClosingReferences(tc.in, keep)
