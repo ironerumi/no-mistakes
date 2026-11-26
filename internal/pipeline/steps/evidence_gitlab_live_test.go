@@ -88,7 +88,7 @@ func TestLiveGitLabEvidenceSectionOnThrowawayMR(t *testing.T) {
 	}
 
 	stale := first + "\n\n## Evidence\n\nstale copy\n"
-	rewritten := appendGeneratedSections("## What Changed\n\n- live check", "low", second, "## Pipeline\n\nrecorded", scm.ProviderGitLab)
+	rewritten := appendGeneratedSections("## What Changed\n\n- live check", "low", second, "## Pipeline\n\nrecorded", scm.ProviderGitLab, nil)
 	if strings.Contains(stripGeneratedSections(stale), "## Evidence") {
 		t.Fatal("strip left the previous Evidence section")
 	}
@@ -96,7 +96,7 @@ func TestLiveGitLabEvidenceSectionOnThrowawayMR(t *testing.T) {
 	t.Logf("merge request %s", mrURL)
 	liveUpdateEvidenceMR(t, ctx, hostName, project, mrURL, stale+"\n\n"+rewritten)
 	// The product rewrites before it publishes. Send that rewrite, not the stale copy.
-	published := appendGeneratedSections(stale, "low", second, "## Pipeline\n\nrecorded", scm.ProviderGitLab)
+	published := appendGeneratedSections(stale, "low", second, "## Pipeline\n\nrecorded", scm.ProviderGitLab, nil)
 	liveUpdateEvidenceMR(t, ctx, hostName, project, mrURL, published)
 	got := liveEvidenceMRDescription(t, ctx, hostName, project, mrURL)
 	if strings.Count(got, "## Evidence") != 1 {

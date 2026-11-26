@@ -114,7 +114,7 @@ func joinBlocks(parts ...string) string {
 }
 
 func narrativeWithIntent(sctx *pipeline.StepContext, whatChanged string) string {
-	narrative := neutralizeAttestationMarkers(resolvedProviderForBody(sctx), stripGeneratedSections(whatChanged))
+	narrative := neutralizeDraftedPRText(sctx, resolvedProviderForBody(sctx), stripGeneratedSections(whatChanged))
 	return prependIntentSection(narrative, sctx)
 }
 
@@ -288,7 +288,7 @@ func foldedWithin(risk, testing, pipeline string, innerBudget int, provider scm.
 			risk = truncateTextAtLineBoundary(risk, riskBudget, essentialPRBodyTruncationMarker())
 		}
 	}
-	inner := strings.Trim(appendGeneratedSectionsToCleanBodyWithinLimit("", risk, testing, pipeline, budget, provider), "\n")
+	inner := strings.Trim(appendGeneratedSectionsToCleanBodyWithinLimit("", risk, testing, pipeline, budget, provider, nil), "\n")
 	if !strings.Contains(inner, carriedAttestation(pipeline)) {
 		inner = minimum
 	}

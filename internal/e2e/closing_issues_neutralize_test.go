@@ -9,8 +9,9 @@ import (
 
 // TestClosingIssueRefsPublishedIntentIsNeutralized drives a real run whose
 // intent carries closing keywords (short, cross-repo, and URL forms) without
-// --closes: the published Intent keeps the text but never a live closing
-// reference, so the PR closes nothing on merge.
+// --closes: the published Intent keeps each reference as a plain non-closing
+// "Refs" reference, never a live or code-wrapped closing one, so the PR closes
+// nothing on merge.
 func TestClosingIssueRefsPublishedIntentIsNeutralized(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude"})
 	statePath := setupStatefulGitHub(t, h)
@@ -28,10 +29,10 @@ func TestClosingIssueRefsPublishedIntentIsNeutralized(t *testing.T) {
 	body := livePRBody(t, statePath, branch)
 	saveEvidence(t, "14-neutralized-intent-pr-body.md", body)
 	for _, want := range []string{
-		"Fixes `#12`",
-		"Resolves: `acme/widgets#3`",
-		"Closes `https://github.com/example/closes/issues/14`",
-		"fixed `http://github.com/example/closes/pull/15`",
+		"Refs #12",
+		"Refs acme/widgets#3",
+		"Refs https://github.com/example/closes/issues/14",
+		"refs http://github.com/example/closes/pull/15",
 	} {
 		if exactLineCount(body, want) != 1 {
 			t.Errorf("neutralized line %q not published exactly once; body:\n%s", want, body)

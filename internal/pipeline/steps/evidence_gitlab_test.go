@@ -86,7 +86,7 @@ func TestGitlabEvidenceSectionUploadsOnceAndRewritesOneSection(t *testing.T) {
 func TestAppendGeneratedSectionsKeepsOneEvidenceSection(t *testing.T) {
 	body := "## What Changed\n\n- updated\n\n## Evidence\n\nold image\n"
 	testing := "## Testing\n\n- ok\n\n## Evidence\n\n`01RUN/shot.png`\n\n![shot](/uploads/abc/shot.png)"
-	got := appendGeneratedSections(body, "low", testing, "## Pipeline\n\nrecorded", scm.ProviderGitLab)
+	got := appendGeneratedSections(body, "low", testing, "## Pipeline\n\nrecorded", scm.ProviderGitLab, nil)
 	if strings.Count(got, "## Evidence") != 1 || strings.Contains(got, "old image") {
 		t.Fatalf("rewritten body =\n%s", got)
 	}
