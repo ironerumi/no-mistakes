@@ -76,11 +76,6 @@ const githubClosingTargetInText = `(?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+)?#[1-9][0-9]
 
 var closingReferenceInTextPattern = regexp.MustCompile(`(?i)\b(` + githubClosingWords + `:?\s+)(` + githubClosingTargetInText + `)\b`)
 
-// codeWrappedClosingReferencePattern is a closing keyword whose target alone
-// sits in an inline code span ("Closes `#12`"): a dead closing reference on
-// GitHub, which is unwrapped before the reference is kept or rewritten.
-var codeWrappedClosingReferencePattern = regexp.MustCompile("(?i)\\b" + githubClosingWords + ":?\\s+`(" + githubClosingTargetInText + ")`")
-
 // GitLab's default closing pattern, from
 // https://docs.gitlab.com/user/project/issues/managing_issues/#default-closing-pattern.
 // Its words are the [Cc]los/[Ff]ix/[Rr]esolv families plus the gerunds and
@@ -142,11 +137,17 @@ func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 	seen := map[string]struct{}{}
 	var lines []string
 	var fence markdownFence
+	var htmlCode string
 	for _, raw := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
 		if grammar.codeAware {
 			inFence := fence.marker != 0
 			fence.consume(raw)
 			if inFence || fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+				continue
+			}
+			inHTMLCode := htmlCode != ""
+			rewriteOutsideCode(raw, &htmlCode, func(s string) string { return s })
+			if inHTMLCode || htmlCode != "" {
 				continue
 			}
 		}
@@ -175,9 +176,6 @@ func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 // GitHub ignores a reference in code and the line would only look like it
 // closes the issue.
 func neutralizeGitHubClosingReferences(s string, keep func(target string) bool) string {
-	if !closingReferenceInTextPattern.MatchString(s) && !codeWrappedClosingReferencePattern.MatchString(s) {
-		return s
-	}
 	rewrite := func(text string) string {
 		return closingReferenceInTextPattern.ReplaceAllStringFunc(text, func(match string) string {
 			m := closingReferenceInTextPattern.FindStringSubmatch(match)
@@ -249,7 +247,7 @@ var (
 // rewriteOutsideCode applies rewrite to the parts of line outside inline code
 // spans and HTML <code>/<pre> elements (open carries an element across
 // lines). A backtick run without a matching closing run is literal text. A
-// single-backtick span holding nothing but the target of the closing keyword
+// code span holding nothing but the target of the closing keyword
 // right before it is unwrapped into the surrounding text instead of kept.
 func rewriteOutsideCode(line string, open *string, rewrite func(string) string) string {
 	var b strings.Builder
@@ -285,8 +283,8 @@ func rewriteOutsideCode(line string, open *string, rewrite func(string) string) 
 			continue
 		}
 		segment := pending + line[text:i]
-		content := line[i+n : closing]
-		if n == 1 && closingTargetOnlyPattern.MatchString(content) && closingKeywordTailPattern.MatchString(segment) && !endsInsideHTMLCode(segment, *open) {
+		content := strings.TrimSpace(line[i+n : closing])
+		if closingTargetOnlyPattern.MatchString(content) && closingKeywordTailPattern.MatchString(segment) && !endsInsideHTMLCode(segment, *open) {
 			pending = segment + content
 		} else {
 			b.WriteString(outsideHTMLCode(segment, open, rewrite))

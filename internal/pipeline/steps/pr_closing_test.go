@@ -665,6 +665,60 @@ func TestPRStep_GitHubClosesKeepsGitHubNeutralization(t *testing.T) {
 	}
 }
 
+func TestHTMLCodeClosingCoverage(t *testing.T) {
+	t.Parallel()
+	if err := verifyClosingIssuesInBody("Example `<pre>` tag\nCloses #333", &pipeline.StepContext{ClosingIssueRefs: []string{"333"}}); err != nil {
+		t.Fatalf("inline code tag hid a live closing declaration: %v", err)
+	}
+	for _, tag := range []string{"pre", "code", "PRE class=\"example\""} {
+		t.Run(tag, func(t *testing.T) {
+			name := strings.Fields(tag)[0]
+			body := "<" + tag + ">\nCloses #333\n</" + name + ">"
+			sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"333"}}
+			if err := verifyClosingIssuesInBody(body, sctx); err == nil {
+				t.Fatal("GitHub verification credited a reference inside HTML code")
+			}
+			section := issuesSection(sctx, body)
+			if section != "## Issues\n\nCloses #333" {
+				t.Fatalf("Issues section = %q, want a live closing declaration", section)
+			}
+			published := appendIssuesSection(body, section)
+			if err := verifyClosingIssuesInBody(published, sctx); err != nil {
+				t.Fatal(err)
+			}
+			if got := issuesSection(sctx, published); got != "" {
+				t.Fatalf("live declaration after HTML code was not credited: %q", got)
+			}
+			if err := verifyClosingIssuesInBody(body, gitlabClosingContext("333")); err != nil {
+				t.Fatalf("GitLab raw-text closing declaration was not credited: %v", err)
+			}
+		})
+	}
+}
+
+func TestPRStep_HTMLCodeReferenceDoesNotSuppressIssues(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		payload, err := json.Marshal(prContent{Title: "add widget", Body: "## What Changed\n\n- add widget\n\n<pre>\nCloses #333\n</pre>"})
+		return &agent.Result{Output: payload}, err
+	}}
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"333"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	body := readPRBodyFile(t, bodyFile)
+	if !strings.Contains(body, "<pre>\nCloses #333\n</pre>") || !strings.Contains(body, "## Issues\n\nCloses #333") {
+		t.Fatalf("published body must preserve code and add a live closing declaration:\n%s", body)
+	}
+}
+
 func TestGitLabClosingCoverageRequiresLiteralSpaces(t *testing.T) {
 	for _, line := range []string{
 		"Closes\t#42", "Closes:\t#42", "Closes issues\t#42",
@@ -751,7 +805,12 @@ func TestNeutralizeGitHubClosingReferencesUnwrapsCodeWrappedTarget(t *testing.T)
 		{"cross-repo and URL", "Resolves: `o/r#5` and closes `https://github.com/o/r/issues/6`", "Refs o/r#5 and refs https://github.com/o/r/issues/6"},
 		{"other spans kept", "Run `make` then Closes `#333`; see `Fixes #7` and `#8`", "Run `make` then Closes #333; see `Fixes #7` and `#8`"},
 		{"span with more than the target", "Closes `#333 now`", "Closes `#333 now`"},
-		{"double backtick span", "Closes ``#333``", "Closes ``#333``"},
+		{"double backtick span", "Closes ``#333``", "Closes #333"},
+		{"padded span", "Closes ` #333 `", "Closes #333"},
+		{"padded longer span", "Closes ```  #333  ```", "Closes #333"},
+		{"unrequested longer span", "Fixes `` #334 ``", "Refs #334"},
+		{"padded cross-repo and URL", "Resolves: `` o/r#5 `` and closes ``` https://github.com/o/r/issues/6 ```", "Refs o/r#5 and refs https://github.com/o/r/issues/6"},
+		{"other longer span kept", "Closes `` #333 now ``", "Closes `` #333 now ``"},
 		{"fenced", "```\nCloses `#333`\n```", "```\nCloses `#333`\n```"},
 		{"HTML code", "<code>Fixes `#334`</code> then Fixes `#334`", "<code>Fixes `#334`</code> then Refs #334"},
 	} {
@@ -778,7 +837,11 @@ func TestPRStep_CodeWrappedDraftedClosingReferenceIsPublishedPlain(t *testing.T)
 		closes     []string
 		updateText string
 		want       string
+		target     string
 	}{
+		{name: "requested double backticks", closes: []string{"333"}, target: "``#333``", want: "Closes #333"},
+		{name: "requested padded", closes: []string{"333"}, target: "` #333 `", want: "Closes #333"},
+		{name: "unrequested padded double backticks", target: "`` #333 ``", want: "Refs #333"},
 		{name: "requested", closes: []string{"333"}, want: "Closes #333"},
 		{name: "requested kept update text", closes: []string{"333"}, updateText: config.PRUpdateTextKeep, want: "Closes #333"},
 		{name: "not requested", want: "Refs #333"},
@@ -789,8 +852,12 @@ func TestPRStep_CodeWrappedDraftedClosingReferenceIsPublishedPlain(t *testing.T)
 			env, _ := fakeGH(t, "")
 			bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
 			ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-				payload := json.RawMessage("{\"title\":\"add widget\",\"body\":\"## What Changed\\n\\n- add widget\\n\\nCloses `#333`\"}")
-				return &agent.Result{Output: payload}, nil
+				target := tc.target
+				if target == "" {
+					target = "`#333`"
+				}
+				payload, err := json.Marshal(prContent{Title: "add widget", Body: "## What Changed\n\n- add widget\n\nCloses " + target})
+				return &agent.Result{Output: payload}, err
 			}}
 			sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 			sctx.Env = env
