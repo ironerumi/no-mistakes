@@ -1681,13 +1681,9 @@ func escapePipelineFoldMarkers(s string) string {
 // again, and a terminal escape hidden inside a marker or closing keyword would
 // otherwise hide it from these escapes and become live once it is removed.
 func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
-	return neutralizePRText(provider, s, nil)
-}
-
-func neutralizePRText(provider scm.Provider, s string, keep func(target string) bool) string {
 	s = neutralizePRControls(s)
 	escaped := escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix))
-	return closingGrammarFor(provider).neutralize(escaped, keep)
+	return closingGrammarFor(provider).neutralize(escaped)
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {

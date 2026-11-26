@@ -20,12 +20,7 @@ import (
 // verbatim, so only the references the author text does not already close
 // are added to its generated appendix. Closure is never inferred from intent,
 // commits, or branch names: pipeline-generated text is published with its
-// closing references neutralized by the provider's closingGrammar. On GitHub a
-// drafted reference to an issue the run requested stays a plain, live closing
-// reference (and the Issues section does not repeat it); every other one is
-// rewritten to a plain, non-closing "Refs" reference. Neither is ever left
-// code-wrapped: GitHub ignores a reference in code, so a backticked closing
-// reference reads as one and closes nothing.
+// closing references neutralized by the provider's closingGrammar.
 
 const issuesSectionHeading = "## Issues"
 
@@ -52,10 +47,8 @@ type closingGrammar struct {
 	// reference extracts the targets of a closing-keyword line.
 	reference *regexp.Regexp
 	// neutralize breaks closing references in generated text under the
-	// supported grammar, which on GitLab is the default server pattern. keep
-	// (nil keeps nothing) reports a target that may stay a live closing
-	// reference because the run requested it with --closes.
-	neutralize func(s string, keep func(target string) bool) string
+	// supported grammar, which on GitLab is the default server pattern.
+	neutralize func(s string) string
 	// codeAware reports whether the forge ignores a reference inside code. It
 	// decides whether the closing-line scan may skip fenced and indented blocks
 	// (a reference there is a closing reference only on a forge that does not).
@@ -167,19 +160,14 @@ func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 // in pipeline-generated PR text, including an issue or pull request URL, to a
 // plain non-closing "Refs" reference ("Fixes #12" -> "Refs #12"), outside
 // fenced, indented, and inline code and HTML <code>/<pre> elements (a tested
-// command renders as <code>). A reference keep reports stays as written: the
-// run requested that issue with --closes, so the line is a live closing
-// reference the Issues section need not repeat. A target the drafting agent
+// command renders as <code>). A target the drafting agent
 // put alone in an inline code span ("Closes `#12`") is unwrapped first, since
 // GitHub ignores a reference in code and the line would only look like it
 // closes the issue.
-func neutralizeGitHubClosingReferences(s string, keep func(target string) bool) string {
+func neutralizeGitHubClosingReferences(s string) string {
 	rewrite := func(text string) string {
 		return closingReferenceInTextPattern.ReplaceAllStringFunc(text, func(match string) string {
 			m := closingReferenceInTextPattern.FindStringSubmatch(match)
-			if keep != nil && keep(m[2]) {
-				return match
-			}
 			if m[1][0] >= 'a' && m[1][0] <= 'z' {
 				return "refs " + m[2]
 			}
@@ -202,47 +190,14 @@ func neutralizeGitHubClosingReferences(s string, keep func(target string) bool) 
 // Callers ask only while no HTML <code>/<pre> element is open: inside one, a
 // fence marker or an indented line (such as an indented closing tag) is the
 // element's text, and skipping it would leave the element open for the rest
-// of the body. Inline code spans are matched within one line only, so a
-// closing reference inside a code span that spans several lines is read as
-// text (TestClosingScanTreatsMultiLineCodeSpansAsText).
+// of the body.
 func skipMarkdownCodeLine(fence *markdownFence, raw string) bool {
 	inFence := fence.marker != 0
 	fence.consume(raw)
 	return inFence || fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ")
 }
 
-// neutralizeDraftedPRText is neutralizeAttestationMarkers for a PR's drafted
-// narrative, the one place a closing reference may stay live: a reference to
-// an issue the run requested with --closes (requestedClosingTargets) is kept
-// as written, so the Issues section does not repeat it. Every pass over that
-// narrative must use this, or a later pass rewrites the kept reference.
-func neutralizeDraftedPRText(sctx *pipeline.StepContext, provider scm.Provider, s string) string {
-	return neutralizePRText(provider, s, requestedClosingTargets(sctx))
-}
-
-// requestedClosingTargets returns the keep predicate for drafted text: a
-// closing target naming one of the run's --closes references, compared the
-// way closingTargets canonicalizes them. A URL target is never kept; the
-// Issues section renders the requested reference in its short form.
-func requestedClosingTargets(sctx *pipeline.StepContext) func(target string) bool {
-	if sctx == nil || len(sctx.ClosingIssueRefs) == 0 {
-		return nil
-	}
-	repo := prRepository(sctx, resolvedProviderForBody(sctx))
-	requested := map[string]struct{}{}
-	for _, ref := range sctx.ClosingIssueRefs {
-		requested[strings.ToLower(ref)] = struct{}{}
-	}
-	return func(target string) bool {
-		if strings.Contains(target, "://") {
-			return false
-		}
-		_, ok := requested[strings.ToLower(closingissues.Localize(strings.TrimPrefix(target, "#"), repo))]
-		return ok
-	}
-}
-
-func neutralizeGitLabClosingReferences(s string, _ func(target string) bool) string {
+func neutralizeGitLabClosingReferences(s string) string {
 	return gitlabClosingKeywordInTextPattern.ReplaceAllStringFunc(s, func(match string) string {
 		return strings.Replace(match, " ", "&#32;", 1)
 	})
@@ -541,16 +496,10 @@ func verifyClosingIssuesInBody(body string, sctx *pipeline.StepContext) error {
 
 // assembleDraftPRBody assembles an ordinary drafted body and appends the
 // Issues section last, reserving its room up front so body-limit truncation
-// sheds generated evidence rather than a closing reference. The section is
-// then rendered against the assembled body, so a requested reference the
-// drafted narrative already closes is not repeated; it can only shrink from
-// the room reserved for it.
+// sheds generated evidence rather than a closing reference.
 func assembleDraftPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD, evidenceMD string, bodyLimit int, provider scm.Provider) string {
 	evidence := neutralizeAttestationMarkers(provider, evidenceMD)
 	section := joinBlocks(evidence, issuesSection(sctx, ""))
-	withSection := func(body string) string {
-		return appendIssuesSection(body, joinBlocks(evidence, issuesSection(sctx, body)))
-	}
 	reserve := 0
 	if section != "" {
 		reserve = len("\n\n" + section)
@@ -561,14 +510,14 @@ func assembleDraftPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, test
 		}
 		if bodyLimit-reserve <= 0 {
 			if evidenceMD != "" {
-				return withSection(assemblePRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit, provider))
+				return appendIssuesSection(assemblePRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit, provider), section)
 			}
 			// The section alone does not fit. Omit it rather than pass a
 			// non-positive (unlimited) budget; the pre-publication check then
 			// refuses a body that would drop a closing reference.
 			return assemblePRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit, provider)
 		}
-		return withSection(assemblePRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit-reserve, provider))
+		return appendIssuesSection(assemblePRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit-reserve, provider), section)
 	}
-	return withSection(buildPRBodyWithin(whatChanged, riskLine, testingMD, pipelineMD, sctx, provider, maxPullRequestBodyBytes-reserve))
+	return appendIssuesSection(buildPRBodyWithin(whatChanged, riskLine, testingMD, pipelineMD, sctx, provider, maxPullRequestBodyBytes-reserve), section)
 }
