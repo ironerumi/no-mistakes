@@ -252,12 +252,46 @@ type closingCodeContext struct {
 }
 
 func (c *closingCodeContext) skipLine(raw string) bool {
-	if c.html != "" || c.inline != 0 {
+	if c.html != "" {
+		return false
+	}
+	if closingInlineBoundary(raw) {
+		c.inline = 0
+	}
+	if c.inline != 0 {
 		return false
 	}
 	inFence := c.fence.marker != 0
 	c.fence.consume(raw)
 	return inFence || c.fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ")
+}
+
+var closingInlineHeadingPattern = regexp.MustCompile(`^ {0,3}#{1,6}(?:[ \t]|$)`)
+
+var closingInlineBlockPattern = regexp.MustCompile(`(?i)^ {0,3}(?:>|(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|$)|(?:=+|-+)[ \t]*$|(?:\*[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:-[ \t]*){3,}$|<(?:!--|\?|![A-Z]|!\[CDATA\[|/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|code|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|pre|script|search|section|source|style|summary|table|tbody|td|textarea|tfoot|th|thead|title|tr|track|ul)(?:[ \t/>]|$)))`)
+
+func closingInlineBoundary(raw string) bool {
+	raw = strings.TrimSuffix(raw, "\r")
+	if strings.TrimSpace(raw) == "" || closingInlineHeadingPattern.MatchString(raw) || closingInlineBlockPattern.MatchString(raw) {
+		return true
+	}
+	var fence markdownFence
+	fence.consume(raw)
+	return fence.marker != 0
+}
+
+func closingInlineFollowing(line, text string) string {
+	if closingInlineHeadingPattern.MatchString(line) {
+		return ""
+	}
+	offset := 0
+	for _, raw := range strings.Split(text, "\n") {
+		if closingInlineBoundary(raw) {
+			return text[:offset]
+		}
+		offset += len(raw) + 1
+	}
+	return text
 }
 
 func closingBacktick(text string, start, width int) int {
@@ -322,7 +356,7 @@ func rewriteOutsideCode(line string, code *closingCodeContext, following string,
 		}
 		closing := closingBacktick(line, i+n, n)
 		if closing < 0 {
-			if closingBacktick(following, 0, n) >= 0 {
+			if closingBacktick(closingInlineFollowing(line, following), 0, n) >= 0 {
 				b.WriteString(outsideHTMLCode(segment, &code.html, rewrite))
 				b.WriteString(line[i:])
 				code.inline = n

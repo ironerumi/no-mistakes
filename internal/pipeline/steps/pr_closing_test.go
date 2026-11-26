@@ -696,12 +696,68 @@ func TestHTMLCodeClosingCoverage(t *testing.T) {
 	}
 }
 
+func TestClosingInlineCodeStopsAtBlocks(t *testing.T) {
+	t.Parallel()
+	for _, boundary := range []string{
+		"", " \t", "# Next", "   ###### Next", "- Next", "+ Next", "* Next",
+		"1. Next", "2) Next", "> Next", "   > Next", "===", "---", "* * *", "_ _ _",
+		"```text\nexample\n```", "~~~\nexample\n~~~", "<pre>\nexample\n    </pre>",
+		"<div>\nexample\n</div>", "<!-- example -->", "<?example?>", "<!DOCTYPE html>",
+	} {
+		t.Run(boundary, func(t *testing.T) {
+			body := "Use a literal ` character.\n" + boundary + "\nFixes #334\n\nRun `make`."
+			want := "Use a literal ` character.\n" + boundary + "\nRefs #334\n\nRun `make`."
+			got := neutralizeGitHubClosingReferences(body, nil)
+			if got != want {
+				t.Fatalf("block boundary hid an unrequested closing declaration:\ngot %q\nwant %q", got, want)
+			}
+			if again := neutralizeGitHubClosingReferences(got, nil); again != want {
+				t.Fatalf("normalization is not stable: %q", again)
+			}
+			sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"334"}}
+			if err := verifyClosingIssuesInBody(body, sctx); err != nil {
+				t.Fatalf("block boundary hid a live declaration: %v", err)
+			}
+			if got := issuesSection(sctx, body); got != "" {
+				t.Fatalf("live declaration was duplicated: %q", got)
+			}
+			if got := neutralizeGitHubClosingReferences(body, func(target string) bool { return target == "#334" }); got != body {
+				t.Fatalf("requested closing declaration was changed: %q", got)
+			}
+		})
+	}
+	body := "# Use a literal ` character.\nFixes #334\nRun `make`."
+	if got := neutralizeGitHubClosingReferences(body, nil); got != "# Use a literal ` character.\nRefs #334\nRun `make`." {
+		t.Fatalf("heading code span crossed its end of line: %q", got)
+	}
+}
+
+func TestPRStep_ParagraphBoundaryDoesNotHideClosingReference(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		payload, err := json.Marshal(prContent{Title: "add widget", Body: "Use a literal ` character.\n\nFixes #334\n\nRun `make`."})
+		return &agent.Result{Output: payload}, err
+	}}
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	body := readPRBodyFile(t, bodyFile)
+	if !strings.Contains(body, "Refs #334") || strings.Contains(body, "Fixes #334") || strings.Contains(body, "## Issues") {
+		t.Fatalf("published body must not close an unrequested issue:\n%s", body)
+	}
+}
+
 func TestClosingCodeContextCoverage(t *testing.T) {
 	t.Parallel()
 	for _, body := range []string{
 		"Example: `literal\nCloses #333\nend`",
 		"Example: ``literal\nCloses #333\nend``",
-		"Example: `literal\n<pre>\n```\nCloses #333\n    end`",
+		"Example: `literal\ntext <pre> ```\nCloses #333\n    end`",
 		"<pre>\nCloses #333\n    </pre>",
 		"<code>\nCloses #333\n\t</code>",
 		"<pre>\n```\nCloses #333\n    </pre>",
@@ -848,7 +904,7 @@ func TestNeutralizeGitHubClosingReferencesUnwrapsCodeWrappedTarget(t *testing.T)
 		{"indented HTML close", "<pre>\nCloses #334\n    </pre>\nCloses `#334`", "<pre>\nCloses #334\n    </pre>\nRefs #334"},
 		{"HTML precedence over fence", "<code>\n```\nCloses #334\n\t</code>\nCloses `#334`", "<code>\n```\nCloses #334\n\t</code>\nRefs #334"},
 		{"HTML precedence over backtick", "<pre>\n`literal\nCloses #334\n    </pre>\nCloses `#334`", "<pre>\n`literal\nCloses #334\n    </pre>\nRefs #334"},
-		{"inline precedence over HTML and fence", "Example: `literal\n<pre>\n```\nCloses #334\n    end`\nCloses `#334`", "Example: `literal\n<pre>\n```\nCloses #334\n    end`\nRefs #334"},
+		{"inline literal HTML and backticks", "Example: `literal\ntext <pre> ```\nCloses #334\n    end`\nCloses `#334`", "Example: `literal\ntext <pre> ```\nCloses #334\n    end`\nRefs #334"},
 		{"unmatched backtick", "Example: `literal\nCloses #334", "Example: `literal\nRefs #334"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
