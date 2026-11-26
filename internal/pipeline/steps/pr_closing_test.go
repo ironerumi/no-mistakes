@@ -721,6 +721,56 @@ func TestHTMLCodeClosingCoverageWithIndentedClosingTag(t *testing.T) {
 	}
 }
 
+func TestHTMLCommentsDoNotChangeClosingCoverage(t *testing.T) {
+	t.Parallel()
+	for _, comment := range []string{
+		"<!-- Use <pre> for logs -->",
+		"<!-- Use <code> for commands -->",
+		"<!--\nUse <PRE class=\"logs\">\nCloses #333\n-->",
+		"<!--\n```\n<code>\nCloses #333\n    -->",
+		"<!-- `<pre> -->",
+		"<!-- first --> <!-- <code> -->",
+	} {
+		t.Run(comment, func(t *testing.T) {
+			sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"333"}}
+			body := comment + "\n\n## Issues\n\nCloses #333"
+			if err := verifyClosingIssuesInBody(body, sctx); err != nil {
+				t.Fatalf("comment hid the live Issues line: %v", err)
+			}
+			if got := issuesSection(sctx, body); got != "" {
+				t.Fatalf("comment caused duplicate closure: %q", got)
+			}
+			if err := verifyClosingIssuesInBody(comment, sctx); err == nil {
+				t.Fatal("comment alone satisfied closing coverage")
+			}
+			if got := issuesSection(sctx, comment); got != "## Issues\n\nCloses #333" {
+				t.Fatalf("comment suppressed the Issues line: %q", got)
+			}
+			if got := neutralizeGitHubClosingReferences(body); got != comment+"\n\n## Issues\n\nRefs #333" {
+				t.Fatalf("comment changed generated-text neutralization: %q", got)
+			}
+		})
+	}
+	for _, tag := range []string{"pre", "code"} {
+		t.Run(tag, func(t *testing.T) {
+			sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"333"}}
+			body := "<" + tag + ">\n<!-- </" + tag + "> -->\nCloses #333\n</" + tag + ">"
+			if err := verifyClosingIssuesInBody(body, sctx); err == nil {
+				t.Fatal("commented closing tag ended the actual code element")
+			}
+			if got := issuesSection(sctx, body); got != "## Issues\n\nCloses #333" {
+				t.Fatalf("code-only reference suppressed closure: %q", got)
+			}
+			if got := neutralizeGitHubClosingReferences(body + "\nCloses `#333`"); got != body+"\nRefs #333" {
+				t.Fatalf("commented closing tag changed neutralization: %q", got)
+			}
+			if err := verifyClosingIssuesInBody(body+"\nCloses #333", sctx); err != nil {
+				t.Fatalf("actual closing tag did not restore coverage: %v", err)
+			}
+		})
+	}
+}
+
 func TestDraftedMultiLineCodeSpanDoesNotSuppressIssues(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{config.PRAppendixFull, config.PRAppendixCollapsed, config.PRAppendixMinimal} {

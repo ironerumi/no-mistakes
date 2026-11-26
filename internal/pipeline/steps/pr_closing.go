@@ -130,15 +130,15 @@ func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 	seen := map[string]struct{}{}
 	var lines []string
 	var fence markdownFence
-	var htmlCode string
+	var htmlCode htmlClosingContext
 	for _, raw := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
 		if grammar.codeAware {
-			if htmlCode == "" && skipMarkdownCodeLine(&fence, raw) {
+			if htmlCode == (htmlClosingContext{}) && skipMarkdownCodeLine(&fence, raw) {
 				continue
 			}
-			inHTMLCode := htmlCode != ""
+			inHTMLCode := htmlCode != (htmlClosingContext{})
 			rewriteOutsideCode(raw, &htmlCode, func(s string) string { return s })
-			if inHTMLCode || htmlCode != "" {
+			if inHTMLCode || htmlCode != (htmlClosingContext{}) {
 				continue
 			}
 		}
@@ -176,9 +176,9 @@ func neutralizeGitHubClosingReferences(s string) string {
 	}
 	lines := strings.Split(s, "\n")
 	var fence markdownFence
-	var htmlCode string
+	var htmlCode htmlClosingContext
 	for i, raw := range lines {
-		if htmlCode == "" && skipMarkdownCodeLine(&fence, raw) {
+		if htmlCode == (htmlClosingContext{}) && skipMarkdownCodeLine(&fence, raw) {
 			continue
 		}
 		lines[i] = rewriteOutsideCode(raw, &htmlCode, rewrite)
@@ -213,11 +213,23 @@ var (
 // lines). A backtick run without a matching closing run is literal text. A
 // code span holding nothing but the target of the closing keyword
 // right before it is unwrapped into the surrounding text instead of kept.
-func rewriteOutsideCode(line string, open *string, rewrite func(string) string) string {
+func rewriteOutsideCode(line string, open *htmlClosingContext, rewrite func(string) string) string {
 	var b strings.Builder
 	pending := ""
 	text := 0
 	for i := 0; i < len(line); {
+		if open.comment || strings.HasPrefix(line[i:], "<!--") {
+			b.WriteString(outsideHTMLCode(pending+line[text:i], open, rewrite))
+			end := strings.Index(line[i:], "-->")
+			if end < 0 {
+				end = len(line)
+			} else {
+				end += i + len("-->")
+			}
+			b.WriteString(outsideHTMLCode(line[i:end], open, rewrite))
+			i, text, pending = end, end, ""
+			continue
+		}
 		if line[i] != '`' {
 			i++
 			continue
@@ -264,37 +276,64 @@ func rewriteOutsideCode(line string, open *string, rewrite func(string) string) 
 
 // endsInsideHTMLCode reports whether text, starting with open element state,
 // ends inside an HTML <code> or <pre> element.
-func endsInsideHTMLCode(text, open string) bool {
+func endsInsideHTMLCode(text string, open htmlClosingContext) bool {
 	state := open
 	outsideHTMLCode(text, &state, func(s string) string { return s })
-	return state != ""
+	return state != (htmlClosingContext{})
 }
 
-var htmlCodeTagPattern = regexp.MustCompile(`(?i)<(/?)(code|pre)\b[^>]*>`)
+type htmlClosingContext struct {
+	element string
+	comment bool
+}
+
+var htmlCodeTagPattern = regexp.MustCompile(`(?i)<!--|-->|<(/?)(code|pre)\b[^>]*>`)
 
 // outsideHTMLCode applies rewrite to the parts of text outside HTML <code>
-// and <pre> elements. open names the element still open from earlier text
-// ("" when none), so an element may span lines.
-func outsideHTMLCode(text string, open *string, rewrite func(string) string) string {
+// and <pre> elements.
+func outsideHTMLCode(text string, open *htmlClosingContext, rewrite func(string) string) string {
 	var b strings.Builder
 	last := 0
 	for _, m := range htmlCodeTagPattern.FindAllStringSubmatchIndex(text, -1) {
+		token := text[m[0]:m[1]]
+		if open.comment {
+			if token == "-->" {
+				b.WriteString(text[last:m[1]])
+				last = m[1]
+				open.comment = false
+			}
+			continue
+		}
+		if token == "<!--" {
+			if open.element == "" {
+				b.WriteString(rewrite(text[last:m[0]]))
+			} else {
+				b.WriteString(text[last:m[0]])
+			}
+			b.WriteString(token)
+			last = m[1]
+			open.comment = true
+			continue
+		}
+		if token == "-->" {
+			continue
+		}
 		closing := m[3] > m[2]
 		name := strings.ToLower(text[m[4]:m[5]])
 		switch {
-		case *open == "" && !closing:
+		case open.element == "" && !closing:
 			b.WriteString(rewrite(text[last:m[0]]))
-			*open = name
-		case *open == name && closing:
+			open.element = name
+		case open.element == name && closing:
 			b.WriteString(text[last:m[0]])
-			*open = ""
+			open.element = ""
 		default:
 			continue
 		}
 		b.WriteString(text[m[0]:m[1]])
 		last = m[1]
 	}
-	if *open == "" {
+	if *open == (htmlClosingContext{}) {
 		b.WriteString(rewrite(text[last:]))
 	} else {
 		b.WriteString(text[last:])
