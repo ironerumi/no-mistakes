@@ -31,8 +31,8 @@ const issuesSectionHeading = "## Issues"
 // than vocabulary:
 //
 //   - GitHub's words are close/fix/resolve - no gerunds, no "implement" - and
-//     GitHub ignores a reference inside code, which is why its neutralizer may
-//     wrap a reference in an inline code span.
+//     GitHub ignores a reference inside code, which is why its closing-line
+//     scan may skip code.
 //   - GitLab's default pattern (the documented server regex, replaceable by a
 //     self-managed administrator) adds the gerunds and "implements", and
 //     Gitlab::ClosingIssueExtractor applies it as a plain regexp to the raw
@@ -48,20 +48,26 @@ type closingGrammar struct {
 	reference *regexp.Regexp
 	// neutralize breaks closing references in generated text under the
 	// supported grammar, which on GitLab is the default server pattern.
-	neutralize func(string) string
+	neutralize func(s string) string
 	// codeAware reports whether the forge ignores a reference inside code. It
 	// decides whether the closing-line scan may skip fenced and indented blocks
 	// (a reference there is a closing reference only on a forge that does not).
 	codeAware bool
 }
 
-const githubClosingKeywordPattern = `(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?\s+(?:#[1-9][0-9]*|[A-Za-z0-9-]+/[A-Za-z0-9._-]+#[1-9][0-9]*)`
+const githubClosingWords = `(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)`
+
+const githubClosingKeywordPattern = githubClosingWords + `:?\s+(?:#[1-9][0-9]*|[A-Za-z0-9-]+/[A-Za-z0-9._-]+#[1-9][0-9]*)`
 
 var closingKeywordLinePattern = regexp.MustCompile(`(?i)^(?:(?:[-*+]|[0-9]+[.)])\s+)?` + githubClosingKeywordPattern + `(?:\s*,\s*` + githubClosingKeywordPattern + `)*[.;!]?$`)
 
 var closingReferencePattern = regexp.MustCompile(`(?i)(?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+#[1-9][0-9]*|#[1-9][0-9]*)`)
 
-var closingReferenceInTextPattern = regexp.MustCompile(`(?i)\b((?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?\s+)((?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+)?#[1-9][0-9]*|https?://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(?:issues|pull)/[1-9][0-9]*)\b`)
+// githubClosingTargetInText is a closing keyword's target in prose: a short or
+// owner/repo reference, or an issue or pull request URL.
+const githubClosingTargetInText = `(?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+)?#[1-9][0-9]*|https?://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(?:issues|pull)/[1-9][0-9]*`
+
+var closingReferenceInTextPattern = regexp.MustCompile(`(?i)\b(` + githubClosingWords + `:?\s+)(` + githubClosingTargetInText + `)\b`)
 
 // GitLab's default closing pattern, from
 // https://docs.gitlab.com/user/project/issues/managing_issues/#default-closing-pattern.
@@ -124,11 +130,15 @@ func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 	seen := map[string]struct{}{}
 	var lines []string
 	var fence markdownFence
+	var htmlCode htmlClosingContext
 	for _, raw := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
 		if grammar.codeAware {
-			inFence := fence.marker != 0
-			fence.consume(raw)
-			if inFence || fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+			if htmlCode == (htmlClosingContext{}) && skipMarkdownCodeLine(&fence, raw) {
+				continue
+			}
+			inHTMLCode := htmlCode != (htmlClosingContext{})
+			rewriteOutsideCode(raw, &htmlCode, func(s string) string { return s })
+			if inHTMLCode || htmlCode != (htmlClosingContext{}) {
 				continue
 			}
 		}
@@ -146,32 +156,45 @@ func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 	return lines
 }
 
-// neutralizeGitHubClosingReferences puts every closing-keyword reference in
-// pipeline-generated PR text, including an issue or pull request URL, in an
-// inline code span ("Fixes `#12`"), outside fenced, indented, and inline code
-// and HTML <code>/<pre> elements (a tested command renders as <code>).
-// GitHub ignores a reference in code, so nothing the pipeline publishes can
-// close an issue; only the Issues section carries live ones.
+// neutralizeGitHubClosingReferences rewrites every closing-keyword reference
+// in pipeline-generated PR text, including an issue or pull request URL, to a
+// plain non-closing "Refs" reference ("Fixes #12" -> "Refs #12"), outside
+// fenced, indented, and inline code and HTML <code>/<pre> elements (a tested
+// command renders as <code>). A target the drafting agent
+// put alone in an inline code span ("Closes `#12`") is unwrapped first, since
+// GitHub ignores a reference in code and the line would only look like it
+// closes the issue.
 func neutralizeGitHubClosingReferences(s string) string {
-	if !closingReferenceInTextPattern.MatchString(s) {
-		return s
+	rewrite := func(text string) string {
+		return closingReferenceInTextPattern.ReplaceAllStringFunc(text, func(match string) string {
+			m := closingReferenceInTextPattern.FindStringSubmatch(match)
+			if m[1][0] >= 'a' && m[1][0] <= 'z' {
+				return "refs " + m[2]
+			}
+			return "Refs " + m[2]
+		})
 	}
 	lines := strings.Split(s, "\n")
 	var fence markdownFence
-	var htmlCode string
+	var htmlCode htmlClosingContext
 	for i, raw := range lines {
-		inFence := fence.marker != 0
-		fence.consume(raw)
-		if inFence || fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+		if htmlCode == (htmlClosingContext{}) && skipMarkdownCodeLine(&fence, raw) {
 			continue
 		}
-		lines[i] = outsideInlineCode(raw, func(text string) string {
-			return outsideHTMLCode(text, &htmlCode, func(text string) string {
-				return closingReferenceInTextPattern.ReplaceAllString(text, "${1}`${2}`")
-			})
-		})
+		lines[i] = rewriteOutsideCode(raw, &htmlCode, rewrite)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// skipMarkdownCodeLine reports whether raw is a fenced or indented code line.
+// Callers ask only while no HTML <code>/<pre> element is open: inside one, a
+// fence marker or an indented line (such as an indented closing tag) is the
+// element's text, and skipping it would leave the element open for the rest
+// of the body.
+func skipMarkdownCodeLine(fence *markdownFence, raw string) bool {
+	inFence := fence.marker != 0
+	fence.consume(raw)
+	return inFence || fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ")
 }
 
 func neutralizeGitLabClosingReferences(s string) string {
@@ -180,44 +203,33 @@ func neutralizeGitLabClosingReferences(s string) string {
 	})
 }
 
-var htmlCodeTagPattern = regexp.MustCompile(`(?i)<(/?)(code|pre)\b[^>]*>`)
+var (
+	closingKeywordTailPattern = regexp.MustCompile(`(?i)\b` + githubClosingWords + `:?\s+$`)
+	closingTargetOnlyPattern  = regexp.MustCompile(`(?i)^(?:` + githubClosingTargetInText + `)$`)
+)
 
-// outsideHTMLCode applies rewrite to the parts of text outside HTML <code>
-// and <pre> elements. open names the element still open from earlier text
-// ("" when none), so an element may span lines.
-func outsideHTMLCode(text string, open *string, rewrite func(string) string) string {
+// rewriteOutsideCode applies rewrite to the parts of line outside inline code
+// spans and HTML <code>/<pre> elements (open carries an element across
+// lines). A backtick run without a matching closing run is literal text. A
+// code span holding nothing but the target of the closing keyword
+// right before it is unwrapped into the surrounding text instead of kept.
+func rewriteOutsideCode(line string, open *htmlClosingContext, rewrite func(string) string) string {
 	var b strings.Builder
-	last := 0
-	for _, m := range htmlCodeTagPattern.FindAllStringSubmatchIndex(text, -1) {
-		closing := m[3] > m[2]
-		name := strings.ToLower(text[m[4]:m[5]])
-		switch {
-		case *open == "" && !closing:
-			b.WriteString(rewrite(text[last:m[0]]))
-			*open = name
-		case *open == name && closing:
-			b.WriteString(text[last:m[0]])
-			*open = ""
-		default:
-			continue
-		}
-		b.WriteString(text[m[0]:m[1]])
-		last = m[1]
-	}
-	if *open == "" {
-		b.WriteString(rewrite(text[last:]))
-	} else {
-		b.WriteString(text[last:])
-	}
-	return b.String()
-}
-
-// outsideInlineCode applies rewrite to the parts of line outside inline code
-// spans. A backtick run without a matching closing run is literal text.
-func outsideInlineCode(line string, rewrite func(string) string) string {
-	var b strings.Builder
+	pending := ""
 	text := 0
 	for i := 0; i < len(line); {
+		if open.comment || strings.HasPrefix(line[i:], "<!--") {
+			b.WriteString(outsideHTMLCode(pending+line[text:i], open, rewrite))
+			end := strings.Index(line[i:], "-->")
+			if end < 0 {
+				end = len(line)
+			} else {
+				end += i + len("-->")
+			}
+			b.WriteString(outsideHTMLCode(line[i:end], open, rewrite))
+			i, text, pending = end, end, ""
+			continue
+		}
 		if line[i] != '`' {
 			i++
 			continue
@@ -246,12 +258,86 @@ func outsideInlineCode(line string, rewrite func(string) string) string {
 			i += n
 			continue
 		}
-		b.WriteString(rewrite(line[text:i]))
-		b.WriteString(line[i : closing+n])
+		segment := pending + line[text:i]
+		content := strings.TrimSpace(line[i+n : closing])
+		if closingTargetOnlyPattern.MatchString(content) && closingKeywordTailPattern.MatchString(segment) && !endsInsideHTMLCode(segment, *open) {
+			pending = segment + content
+		} else {
+			b.WriteString(outsideHTMLCode(segment, open, rewrite))
+			b.WriteString(line[i : closing+n])
+			pending = ""
+		}
 		i = closing + n
 		text = i
 	}
-	b.WriteString(rewrite(line[text:]))
+	b.WriteString(outsideHTMLCode(pending+line[text:], open, rewrite))
+	return b.String()
+}
+
+// endsInsideHTMLCode reports whether text, starting with open element state,
+// ends inside an HTML <code> or <pre> element.
+func endsInsideHTMLCode(text string, open htmlClosingContext) bool {
+	state := open
+	outsideHTMLCode(text, &state, func(s string) string { return s })
+	return state != (htmlClosingContext{})
+}
+
+type htmlClosingContext struct {
+	element string
+	comment bool
+}
+
+var htmlCodeTagPattern = regexp.MustCompile(`(?i)<!--|-->|<(/?)(code|pre)\b[^>]*>`)
+
+// outsideHTMLCode applies rewrite to the parts of text outside HTML <code>
+// and <pre> elements.
+func outsideHTMLCode(text string, open *htmlClosingContext, rewrite func(string) string) string {
+	var b strings.Builder
+	last := 0
+	for _, m := range htmlCodeTagPattern.FindAllStringSubmatchIndex(text, -1) {
+		token := text[m[0]:m[1]]
+		if open.comment {
+			if token == "-->" {
+				b.WriteString(text[last:m[1]])
+				last = m[1]
+				open.comment = false
+			}
+			continue
+		}
+		if token == "<!--" {
+			if open.element == "" {
+				b.WriteString(rewrite(text[last:m[0]]))
+			} else {
+				b.WriteString(text[last:m[0]])
+			}
+			b.WriteString(token)
+			last = m[1]
+			open.comment = true
+			continue
+		}
+		if token == "-->" {
+			continue
+		}
+		closing := m[3] > m[2]
+		name := strings.ToLower(text[m[4]:m[5]])
+		switch {
+		case open.element == "" && !closing:
+			b.WriteString(rewrite(text[last:m[0]]))
+			open.element = name
+		case open.element == name && closing:
+			b.WriteString(text[last:m[0]])
+			open.element = ""
+		default:
+			continue
+		}
+		b.WriteString(text[m[0]:m[1]])
+		last = m[1]
+	}
+	if *open == (htmlClosingContext{}) {
+		b.WriteString(rewrite(text[last:]))
+	} else {
+		b.WriteString(text[last:])
+	}
 	return b.String()
 }
 
@@ -451,7 +537,8 @@ func verifyClosingIssuesInBody(body string, sctx *pipeline.StepContext) error {
 // Issues section last, reserving its room up front so body-limit truncation
 // sheds generated evidence rather than a closing reference.
 func assembleDraftPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD, evidenceMD string, bodyLimit int, provider scm.Provider) string {
-	section := joinBlocks(neutralizeAttestationMarkers(provider, evidenceMD), issuesSection(sctx, ""))
+	evidence := neutralizeAttestationMarkers(provider, evidenceMD)
+	section := joinBlocks(evidence, issuesSection(sctx, ""))
 	reserve := 0
 	if section != "" {
 		reserve = len("\n\n" + section)

@@ -53,13 +53,13 @@ func TestPRStep_NeutralizesClosingReferenceInPublishedIntent(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := readPRBodyFile(t, bodyFile)
-	if !strings.Contains(body, "Fixes `#12`") || strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body, githubClosingGrammar)) != 0 {
+	if !strings.Contains(body, "Refs #12") || strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body, githubClosingGrammar)) != 0 {
 		t.Fatalf("intent's Fixes #12 must be published neutralized:\n%s", body)
 	}
 }
 
-// A closing reference in the agent-drafted narrative is published
-// neutralized: closure comes only from --closes.
+// A closing reference in the agent-drafted narrative is published as a plain
+// non-closing reference: closure comes only from --closes.
 func TestPRStep_NeutralizesClosingReferenceInDraftedNarrative(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -76,14 +76,12 @@ func TestPRStep_NeutralizesClosingReferenceInDraftedNarrative(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := readPRBodyFile(t, bodyFile)
-	if !strings.Contains(body, "Closes `#7`") || strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body, githubClosingGrammar)) != 0 {
+	if !strings.Contains(body, "Refs #7") || strings.Contains(body, "`#7`") || strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body, githubClosingGrammar)) != 0 {
 		t.Fatalf("drafted closing reference not neutralized:\n%s", body)
 	}
 }
 
-// With --closes, only the Issues section closes: a drafted reference to the
-// same issue is neutralized and the requested one renders and verifies once.
-func TestPRStep_ClosesRendersOnlyInIssuesSection(t *testing.T) {
+func TestPRStep_ClosesNeutralizesDraftAndAddsIssues(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	env, _ := fakeGH(t, "")
@@ -102,15 +100,15 @@ func TestPRStep_ClosesRendersOnlyInIssuesSection(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := readPRBodyFile(t, bodyFile)
-	if got := strings.Join(extractClosingKeywordLines(body, githubClosingGrammar), "|"); got != "Closes #95" || !strings.Contains(body, "## Issues\n\nCloses #95") {
-		t.Fatalf("closing lines = %q, want only the Issues section's Closes #95:\n%s", got, body)
+	if got := strings.Join(extractClosingKeywordLines(body, githubClosingGrammar), "|"); got != "Closes #95" || strings.Count(body, "Closes #95") != 1 || !strings.Contains(body, "## Issues\n\nCloses #95") || !strings.Contains(body, "Refs #95") {
+		t.Fatalf("closing lines = %q, want neutralized draft and explicit Issues line:\n%s", got, body)
 	}
 }
 
 func TestNeutralizeClosingReferences(t *testing.T) {
 	t.Parallel()
 	in := "Fixes #12 and resolved: owner/repo#3\n- closes #4.\nsee #5, fixes `#6`, `Fixes #7`\n```\nCloses #8\n```\n    Fixes #9"
-	want := "Fixes `#12` and resolved: `owner/repo#3`\n- closes `#4`.\nsee #5, fixes `#6`, `Fixes #7`\n```\nCloses #8\n```\n    Fixes #9"
+	want := "Refs #12 and refs owner/repo#3\n- refs #4.\nsee #5, refs #6, `Fixes #7`\n```\nCloses #8\n```\n    Fixes #9"
 	got := neutralizeGitHubClosingReferences(in)
 	if got != want {
 		t.Fatalf("neutralizeClosingReferences = %q, want %q", got, want)
@@ -123,7 +121,7 @@ func TestNeutralizeClosingReferences(t *testing.T) {
 func TestNeutralizeClosingReferencesURLForm(t *testing.T) {
 	t.Parallel()
 	in := "Fixes https://github.com/o/r/issues/12\nresolves: http://ghe.example.com:8080/o/r/pull/3.\nsee https://github.com/o/r/issues/5, `Closes https://github.com/o/r/issues/6`"
-	want := "Fixes `https://github.com/o/r/issues/12`\nresolves: `http://ghe.example.com:8080/o/r/pull/3`.\nsee https://github.com/o/r/issues/5, `Closes https://github.com/o/r/issues/6`"
+	want := "Refs https://github.com/o/r/issues/12\nrefs http://ghe.example.com:8080/o/r/pull/3.\nsee https://github.com/o/r/issues/5, `Closes https://github.com/o/r/issues/6`"
 	got := neutralizeGitHubClosingReferences(in)
 	if got != want {
 		t.Fatalf("neutralizeClosingReferences = %q, want %q", got, want)
@@ -142,7 +140,7 @@ func TestNeutralizeClosingReferencesLeavesHTMLCodeUnchanged(t *testing.T) {
 		t.Fatalf("tested command did not render as HTML code: %q", rendered)
 	}
 	in := "Fixes #3 via " + rendered + " then fixes #4\n<pre>\nCloses #5\n</pre>\nresolves #6"
-	want := "Fixes `#3` via " + rendered + " then fixes `#4`\n<pre>\nCloses #5\n</pre>\nresolves `#6`"
+	want := "Refs #3 via " + rendered + " then refs #4\n<pre>\nCloses #5\n</pre>\nrefs #6"
 	if got := neutralizeAttestationMarkers(scm.ProviderGitHub, in); got != want {
 		t.Fatalf("neutralizeAttestationMarkers = %q, want %q", got, want)
 	}
@@ -428,13 +426,13 @@ func TestNeutralizeGitLabClosingReferences(t *testing.T) {
 	}
 }
 
-// GitHub's neutralizer is untouched: the GitLab-only words stay ordinary text,
-// and the code-block exemption it relies on stays exactly as it was.
+// GitHub's neutralizer leaves the GitLab-only words as ordinary text and keeps
+// its code-block exemption.
 func TestNeutralizeGitHubClosingReferencesLeavesGitLabOnlyFormsAlone(t *testing.T) {
 	t.Parallel()
 
 	in := "Implements #12\nFixing #13\n```\nFixes #14\n```\nFixes #15"
-	want := "Implements #12\nFixing #13\n```\nFixes #14\n```\nFixes `#15`"
+	want := "Implements #12\nFixing #13\n```\nFixes #14\n```\nRefs #15"
 	if got := neutralizeGitHubClosingReferences(in); got != want {
 		t.Fatalf("neutralizeGitHubClosingReferences() = %q, want %q", got, want)
 	}
@@ -664,6 +662,154 @@ func TestPRStep_GitHubClosesKeepsGitHubNeutralization(t *testing.T) {
 	}
 }
 
+func TestHTMLCodeClosingCoverage(t *testing.T) {
+	t.Parallel()
+	if err := verifyClosingIssuesInBody("Example `<pre>` tag\nCloses #333", &pipeline.StepContext{ClosingIssueRefs: []string{"333"}}); err != nil {
+		t.Fatalf("inline code tag hid a live closing declaration: %v", err)
+	}
+	for _, tag := range []string{"pre", "code", "PRE class=\"example\""} {
+		t.Run(tag, func(t *testing.T) {
+			name := strings.Fields(tag)[0]
+			body := "<" + tag + ">\nCloses #333\n</" + name + ">"
+			sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"333"}}
+			if err := verifyClosingIssuesInBody(body, sctx); err == nil {
+				t.Fatal("GitHub verification credited a reference inside HTML code")
+			}
+			section := issuesSection(sctx, body)
+			if section != "## Issues\n\nCloses #333" {
+				t.Fatalf("Issues section = %q, want a live closing declaration", section)
+			}
+			published := appendIssuesSection(body, section)
+			if err := verifyClosingIssuesInBody(published, sctx); err != nil {
+				t.Fatal(err)
+			}
+			if got := issuesSection(sctx, published); got != "" {
+				t.Fatalf("live declaration after HTML code was not credited: %q", got)
+			}
+			if err := verifyClosingIssuesInBody(body, gitlabClosingContext("333")); err != nil {
+				t.Fatalf("GitLab raw-text closing declaration was not credited: %v", err)
+			}
+		})
+	}
+}
+
+// An HTML code element stays open until its closing tag, even when that tag
+// is indented or the element holds a fence marker: the fence and indentation
+// rules apply only outside it, so a closing line inside never counts and the
+// live Issues line after it always does.
+func TestHTMLCodeClosingCoverageWithIndentedClosingTag(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{
+		"<pre>\nCloses #333\n    </pre>",
+		"<code>\nCloses #333\n\t</code>",
+		"<pre>\n```\nCloses #333\n    </pre>",
+		"<code>\n`literal\nCloses #333\n    </code>",
+	} {
+		t.Run(body, func(t *testing.T) {
+			sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"333"}}
+			if err := verifyClosingIssuesInBody(body, sctx); err == nil {
+				t.Fatal("code-only declaration must not satisfy GitHub closing coverage")
+			}
+			section := issuesSection(sctx, body)
+			if section != "## Issues\n\nCloses #333" {
+				t.Fatalf("code-only declaration suppressed the live Issues entry: %q", section)
+			}
+			if err := verifyClosingIssuesInBody(appendIssuesSection(body, section), sctx); err != nil {
+				t.Fatalf("live declaration after the HTML element did not verify: %v", err)
+			}
+		})
+	}
+}
+
+func TestHTMLCommentsDoNotChangeClosingCoverage(t *testing.T) {
+	t.Parallel()
+	for _, comment := range []string{
+		"<!-- Use <pre> for logs -->",
+		"<!-- Use <code> for commands -->",
+		"<!--\nUse <PRE class=\"logs\">\nCloses #333\n-->",
+		"<!--\n```\n<code>\nCloses #333\n    -->",
+		"<!-- `<pre> -->",
+		"<!-- first --> <!-- <code> -->",
+	} {
+		t.Run(comment, func(t *testing.T) {
+			sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"333"}}
+			body := comment + "\n\n## Issues\n\nCloses #333"
+			if err := verifyClosingIssuesInBody(body, sctx); err != nil {
+				t.Fatalf("comment hid the live Issues line: %v", err)
+			}
+			if got := issuesSection(sctx, body); got != "" {
+				t.Fatalf("comment caused duplicate closure: %q", got)
+			}
+			if err := verifyClosingIssuesInBody(comment, sctx); err == nil {
+				t.Fatal("comment alone satisfied closing coverage")
+			}
+			if got := issuesSection(sctx, comment); got != "## Issues\n\nCloses #333" {
+				t.Fatalf("comment suppressed the Issues line: %q", got)
+			}
+			if got := neutralizeGitHubClosingReferences(body); got != comment+"\n\n## Issues\n\nRefs #333" {
+				t.Fatalf("comment changed generated-text neutralization: %q", got)
+			}
+		})
+	}
+	for _, tag := range []string{"pre", "code"} {
+		t.Run(tag, func(t *testing.T) {
+			sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"333"}}
+			body := "<" + tag + ">\n<!-- </" + tag + "> -->\nCloses #333\n</" + tag + ">"
+			if err := verifyClosingIssuesInBody(body, sctx); err == nil {
+				t.Fatal("commented closing tag ended the actual code element")
+			}
+			if got := issuesSection(sctx, body); got != "## Issues\n\nCloses #333" {
+				t.Fatalf("code-only reference suppressed closure: %q", got)
+			}
+			if got := neutralizeGitHubClosingReferences(body + "\nCloses `#333`"); got != body+"\nRefs #333" {
+				t.Fatalf("commented closing tag changed neutralization: %q", got)
+			}
+			if err := verifyClosingIssuesInBody(body+"\nCloses #333", sctx); err != nil {
+				t.Fatalf("actual closing tag did not restore coverage: %v", err)
+			}
+		})
+	}
+}
+
+func TestDraftedMultiLineCodeSpanDoesNotSuppressIssues(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{config.PRAppendixFull, config.PRAppendixCollapsed, config.PRAppendixMinimal} {
+		for _, limit := range []int{0, 2048} {
+			t.Run(fmt.Sprintf("%s/limit-%d", mode, limit), func(t *testing.T) {
+				sctx := &pipeline.StepContext{Config: &config.Config{}, ClosingIssueRefs: []string{"333"}}
+				sctx.Config.PR.Appendix = mode
+				body := assembleDraftPRBody(sctx, "Example: `literal\nCloses #333\nend`", "low", "", "", "", limit, scm.ProviderGitHub)
+				if !strings.Contains(body, "Example: `literal\nRefs #333\nend`") || !strings.HasSuffix(body, "## Issues\n\nCloses #333") || strings.Count(body, "Closes #333") != 1 {
+					t.Fatalf("drafted code span suppressed the explicit Issues line:\n%s", body)
+				}
+			})
+		}
+	}
+}
+
+func TestPRStep_HTMLCodeReferenceDoesNotSuppressIssues(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		payload, err := json.Marshal(prContent{Title: "add widget", Body: "## What Changed\n\n- add widget\n\n<pre>\nCloses #333\n</pre>"})
+		return &agent.Result{Output: payload}, err
+	}}
+	sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"333"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	body := readPRBodyFile(t, bodyFile)
+	if !strings.Contains(body, "<pre>\nCloses #333\n</pre>") || !strings.Contains(body, "## Issues\n\nCloses #333") {
+		t.Fatalf("published body must preserve code and add a live closing declaration:\n%s", body)
+	}
+}
+
 func TestGitLabClosingCoverageRequiresLiteralSpaces(t *testing.T) {
 	for _, line := range []string{
 		"Closes\t#42", "Closes:\t#42", "Closes issues\t#42",
@@ -710,9 +856,7 @@ func TestGitLabClosingCoverageRejectsTabs(t *testing.T) {
 	}
 }
 
-// A supplied description is narrative like any other: a closing keyword in it
-// is neutralized, and only --closes publishes a live reference.
-func TestPRStep_SuppliedBodyClosesOnlyThroughTheIssuesSection(t *testing.T) {
+func TestPRStep_SuppliedBodyRequestedReferenceUsesIssues(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	env, _ := fakeGH(t, "")
@@ -729,7 +873,130 @@ func TestPRStep_SuppliedBodyClosesOnlyThroughTheIssuesSection(t *testing.T) {
 		t.Fatal(err)
 	}
 	published := readPRBodyFile(t, bodyFile)
-	if got := strings.Join(extractClosingKeywordLines(published, githubClosingGrammar), "|"); got != "Closes #95" || !strings.Contains(published, "## Issues\n\nCloses #95") {
-		t.Fatalf("closing lines = %q, want only the Issues section's Closes #95:\n%s", got, published)
+	if got := strings.Join(extractClosingKeywordLines(published, githubClosingGrammar), "|"); got != "Closes #95" || strings.Count(published, "Closes #95") != 1 || !strings.Contains(published, "## Issues\n\nCloses #95") || !strings.Contains(published, "Refs #95") {
+		t.Fatalf("closing lines = %q, want neutralized description and explicit Issues line:\n%s", got, published)
+	}
+}
+
+// A closing reference is never published code-wrapped: GitHub ignores a
+// reference in code, so "Closes `#333`" reads as closing and closes nothing.
+func TestNeutralizeGitHubClosingReferencesUnwrapsCodeWrappedTarget(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, in, want string }{
+		{"requested", "Closes `#333`", "Refs #333"},
+		{"requested plain", "Closes #333", "Refs #333"},
+		{"not requested", "Fixes `#334`", "Refs #334"},
+		{"not requested plain", "fixes #334 partly", "refs #334 partly"},
+		{"cross-repo and URL", "Resolves: `o/r#5` and closes `https://github.com/o/r/issues/6`", "Refs o/r#5 and refs https://github.com/o/r/issues/6"},
+		{"other spans kept", "Run `make` then Closes `#333`; see `Fixes #7` and `#8`", "Run `make` then Refs #333; see `Fixes #7` and `#8`"},
+		{"span with more than the target", "Closes `#333 now`", "Closes `#333 now`"},
+		{"double backtick span", "Closes ``#333``", "Refs #333"},
+		{"padded span", "Closes ` #333 `", "Refs #333"},
+		{"padded longer span", "Closes ```  #333  ```", "Refs #333"},
+		{"unrequested longer span", "Fixes `` #334 ``", "Refs #334"},
+		{"padded cross-repo and URL", "Resolves: `` o/r#5 `` and closes ``` https://github.com/o/r/issues/6 ```", "Refs o/r#5 and refs https://github.com/o/r/issues/6"},
+		{"other longer span kept", "Closes `` #333 now ``", "Closes `` #333 now ``"},
+		{"fenced", "```\nCloses `#333`\n```", "```\nCloses `#333`\n```"},
+		{"HTML code", "<code>Fixes `#334`</code> then Fixes `#334`", "<code>Fixes `#334`</code> then Refs #334"},
+		{"indented HTML close", "<pre>\nCloses #334\n    </pre>\nCloses `#334`", "<pre>\nCloses #334\n    </pre>\nRefs #334"},
+		{"HTML precedence over fence", "<code>\n```\nCloses #334\n\t</code>\nCloses `#334`", "<code>\n```\nCloses #334\n\t</code>\nRefs #334"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := neutralizeGitHubClosingReferences(tc.in)
+			if got != tc.want {
+				t.Fatalf("neutralizeGitHubClosingReferences(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if again := neutralizeGitHubClosingReferences(got); again != got {
+				t.Fatalf("not idempotent: %q -> %q", got, again)
+			}
+		})
+	}
+}
+
+func TestPRStep_CodeWrappedDraftedClosingReferenceIsPublishedPlain(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		closes     []string
+		updateText string
+		want       string
+		target     string
+	}{
+		{name: "requested double backticks", closes: []string{"333"}, target: "``#333``", want: "Refs #333"},
+		{name: "requested padded", closes: []string{"333"}, target: "` #333 `", want: "Refs #333"},
+		{name: "unrequested padded double backticks", target: "`` #333 ``", want: "Refs #333"},
+		{name: "requested", closes: []string{"333"}, want: "Refs #333"},
+		{name: "requested kept update text", closes: []string{"333"}, updateText: config.PRUpdateTextKeep, want: "Refs #333"},
+		{name: "not requested", want: "Refs #333"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			env, _ := fakeGH(t, "")
+			bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+			ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				target := tc.target
+				if target == "" {
+					target = "`#333`"
+				}
+				payload, err := json.Marshal(prContent{Title: "add widget", Body: "## What Changed\n\n- add widget\n\nCloses " + target})
+				return &agent.Result{Output: payload}, err
+			}}
+			sctx := newPRTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Env = env
+			if tc.updateText != "" {
+				sctx.Config.PR.UpdateText = tc.updateText
+				sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := sctx.DB.UpdateStepStatus(sr.ID, types.StepStatusCompleted); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.closes != nil {
+				if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, tc.closes); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if _, err := (&PRStep{}).Execute(sctx); err != nil {
+				t.Fatal(err)
+			}
+			body := readPRBodyFile(t, bodyFile)
+			if strings.Contains(body, "`#333`") || strings.Count(body, tc.want) != 1 || strings.Count(body, "Closes #333") != len(tc.closes) || (strings.Contains(body, "## Issues\n\nCloses #333") != (tc.closes != nil)) {
+				t.Fatalf("want %q exactly once, plain, and Issues only when requested:\n%s", tc.want, body)
+			}
+			wantLines := ""
+			if tc.closes != nil {
+				wantLines = "Closes #333"
+			}
+			if got := strings.Join(extractClosingKeywordLines(body, githubClosingGrammar), "|"); got != wantLines {
+				t.Fatalf("closing lines = %q, want %q:\n%s", got, wantLines, body)
+			}
+		})
+	}
+}
+
+func TestPRTemplate_CodeWrappedRequestedReferenceRendersOnce(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		data, _ := json.Marshal(prContent{Title: "feat(pipeline): fill template", Body: filledPRTemplate + "\n\nCloses `#42`\n"})
+		return &agent.Result{Output: data}, nil
+	}
+	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"42"}); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := fakeGH(t, "")
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile)
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	body := readPRBodyFile(t, bodyFile)
+	if strings.Contains(body, "`#42`") || strings.Count(body, "Closes #42") != 1 || !strings.Contains(body, "## Issues\n\nCloses #42") || !strings.Contains(body, "Refs #42") {
+		t.Fatalf("want neutralized narrative and one plain Issues line:\n%s", body)
 	}
 }
