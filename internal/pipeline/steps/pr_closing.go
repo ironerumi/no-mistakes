@@ -162,7 +162,7 @@ func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 // own --closes references, which the PR closes anyway. nil keeps nothing.
 type closingKeep func(target string) bool
 
-// closingKeepFor keeps a short (#N) or owner/repo#N target the run requested
+// closingKeepFor keeps a short (#N), owner/repo#N, or same-forge issue URL target the run requested
 // with --closes, compared the way the Issues section compares them
 // (closingTargets), so author text never calls an issue the PR closes "Refs".
 func closingKeepFor(sctx *pipeline.StepContext) closingKeep {
@@ -191,10 +191,10 @@ func closingKeepFor(sctx *pipeline.StepContext) closingKeep {
 				return false
 			}
 			parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
-			if len(parts) != 4 || parts[2] != "issues" || !strings.EqualFold(strings.Join(parts[:2], "/"), repo) {
+			if len(parts) != 4 || parts[2] != "issues" {
 				return false
 			}
-			target = parts[3]
+			target = strings.Join(parts[:2], "/") + "#" + parts[3]
 		}
 		_, ok := requested[strings.ToLower(closingissues.Localize(strings.TrimPrefix(target, "#"), repo))]
 		return ok

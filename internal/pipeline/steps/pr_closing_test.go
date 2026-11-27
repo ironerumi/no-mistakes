@@ -1018,9 +1018,9 @@ func TestPRStep_SuppliedRequestedIssueURLStaysClosing(t *testing.T) {
 	sctx := newPRTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	insertCompletedStep(t, sctx, types.StepReview, "", "")
-	title, body := "Add widget", "Adds the widget.\n\nCloses https://github.com/test/repo/issues/325"
+	title, body := "Add widget", "Adds the widget.\n\nCloses https://github.com/test/repo/issues/325\nCloses https://github.com/other/project/issues/7"
 	sctx.Run.PRTitle, sctx.Run.PRBody = &title, &body
-	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"325"}); err != nil {
+	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"325", "other/project#7"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := (&PRStep{}).Execute(sctx); err != nil {
@@ -1108,10 +1108,28 @@ func TestNeutralizeKeepsTheRunsOwnClosesTargets(t *testing.T) {
 			want:   "Refs https://elsewhere.example/test/repo/issues/325",
 		},
 		{
-			name:   "other repository URL is neutralized even when requested",
+			name:   "requested other repository issue URL stays closing",
 			closes: "other/repo#325",
 			in:     "Closes https://github.com/other/repo/issues/325",
+			want:   "Closes https://github.com/other/repo/issues/325",
+		},
+		{
+			name:   "unrequested other repository issue URL is neutralized",
+			closes: "325",
+			in:     "Closes https://github.com/other/repo/issues/325",
 			want:   "Refs https://github.com/other/repo/issues/325",
+		},
+		{
+			name:   "requested other repository on another forge is neutralized",
+			closes: "other/repo#325",
+			in:     "Closes https://elsewhere.example/other/repo/issues/325",
+			want:   "Refs https://elsewhere.example/other/repo/issues/325",
+		},
+		{
+			name:   "other repository pull request is not the requested issue",
+			closes: "other/repo#325",
+			in:     "Closes https://github.com/other/repo/pull/325",
+			want:   "Refs https://github.com/other/repo/pull/325",
 		},
 		{
 			name:   "unrequested issue URL is neutralized",
