@@ -1011,6 +1011,44 @@ func TestPRTemplate_CodeWrappedRequestedReferenceRendersOnce(t *testing.T) {
 	}
 }
 
+func TestPRStep_SuppliedRequestedIssueURLStaysClosing(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	sctx := newPRTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	insertCompletedStep(t, sctx, types.StepReview, "", "")
+	title, body := "Add widget", "Adds the widget.\n\nCloses https://github.com/test/repo/issues/325"
+	sctx.Run.PRTitle, sctx.Run.PRBody = &title, &body
+	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"325"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	published := readPRBodyFile(t, envEntry(env, "FAKE_CLI_PR_BODY_FILE"))
+	if !strings.Contains(published, body) || strings.Contains(published, "Refs https://github.com/test/repo/issues/325") {
+		t.Fatalf("requested issue URL must stay closing in the published author narrative:\n%s", published)
+	}
+}
+
+func TestRequestedReferencesAreNeutralizedOutsideAuthorNarrative(t *testing.T) {
+	t.Parallel()
+	sctx := &pipeline.StepContext{Config: &config.Config{}, ClosingIssueRefs: []string{"325"}, UserIntent: "Closes #325"}
+	body := assembleDraftPRBody(sctx, "Author: Closes #325", "Risk: Closes #325", "## Testing\n\nTesting: Closes #325", "", "## Evidence\n\nEvidence: Closes #325", 0, scm.ProviderGitHub)
+	for _, want := range []string{"Author: Closes #325", "Risk: Refs #325", "Testing: Refs #325", "Evidence: Refs #325", "## Intent\n\nRefs #325", "## Issues\n\nCloses #325"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("published body missing %q:\n%s", want, body)
+		}
+	}
+	for _, mode := range []string{config.PRAppendixFull, config.PRAppendixCollapsed, config.PRAppendixMinimal} {
+		appendix := appendixEvidence(mode, prBodyFlavorFor(scm.ProviderGitHub), "Risk: Closes #325", "## Testing\n\nTesting: Closes #325", "", scm.ProviderGitHub)
+		if strings.Contains(appendix, "Closes #325") || !strings.Contains(appendix, "Refs #325") {
+			t.Fatalf("%s appendix must neutralize requested references:\n%s", mode, appendix)
+		}
+	}
+}
+
 // A closing reference to one of the run's own --closes targets stays closing
 // in author text: the PR closes it anyway, and a "Refs" there reads as
 // "named but kept open" to a repository's PR-body check (issue #24). Shapes
@@ -1052,10 +1090,40 @@ func TestNeutralizeKeepsTheRunsOwnClosesTargets(t *testing.T) {
 			want:   "Closes #325\nrefs #19\nRefs other/repo#325",
 		},
 		{
-			name:   "URL target is still neutralized",
+			name:   "same-forge own-repository issue URL stays closing",
 			closes: "325",
 			in:     "Closes https://github.com/test/repo/issues/325",
-			want:   "Refs https://github.com/test/repo/issues/325",
+			want:   "Closes https://github.com/test/repo/issues/325",
+		},
+		{
+			name:   "code-wrapped requested issue URL stays closing",
+			closes: "325",
+			in:     "Closes `https://github.com/test/repo/issues/325`",
+			want:   "Closes https://github.com/test/repo/issues/325",
+		},
+		{
+			name:   "other forge URL is neutralized",
+			closes: "325",
+			in:     "Closes https://elsewhere.example/test/repo/issues/325",
+			want:   "Refs https://elsewhere.example/test/repo/issues/325",
+		},
+		{
+			name:   "other repository URL is neutralized even when requested",
+			closes: "other/repo#325",
+			in:     "Closes https://github.com/other/repo/issues/325",
+			want:   "Refs https://github.com/other/repo/issues/325",
+		},
+		{
+			name:   "unrequested issue URL is neutralized",
+			closes: "325",
+			in:     "Closes https://github.com/test/repo/issues/326",
+			want:   "Refs https://github.com/test/repo/issues/326",
+		},
+		{
+			name:   "pull request URL is not the requested issue",
+			closes: "325",
+			in:     "Closes https://github.com/test/repo/pull/325",
+			want:   "Refs https://github.com/test/repo/pull/325",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

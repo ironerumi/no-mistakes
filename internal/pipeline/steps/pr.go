@@ -1162,7 +1162,7 @@ func buildPRBodyFull(body, riskLine, testingMD, pipelineMD string, sctx *pipelin
 	sections := appendGeneratedSectionsToCleanBodyWithinLimit(sctx, body, riskLine, testingMD, pipelineMD, maxBytes, provider)
 	// Neutralized for the same reason as in prependIntentSection: intent is
 	// agent-extracted text placed ahead of the pipeline section.
-	cleaned := neutralizeAttestationMarkers(sctx, provider, publicPRIntent(sctx))
+	cleaned := neutralizeAttestationMarkers(nil, provider, publicPRIntent(sctx))
 	if cleaned == "" {
 		return sections
 	}
@@ -1210,8 +1210,8 @@ func appendGeneratedSectionsToCleanBody(sctx *pipeline.StepContext, body, riskLi
 // counts exactly the same.
 func appendGeneratedSectionsToCleanBodyWithinLimit(sctx *pipeline.StepContext, body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {
 	body = neutralizeAttestationMarkers(sctx, provider, body)
-	riskLine = neutralizeAttestationMarkers(sctx, provider, riskLine)
-	testingMD = neutralizeAttestationMarkers(sctx, provider, testingMD)
+	riskLine = neutralizeAttestationMarkers(nil, provider, riskLine)
+	testingMD = neutralizeAttestationMarkers(nil, provider, testingMD)
 	generatedSections := generatedEssentialSections(riskLine, testingMD)
 	prefix := body + generatedSections
 	if pipelineMD == "" {
@@ -1920,7 +1920,7 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 	// Intent is agent-extracted text that lands ahead of the pipeline section,
 	// so it can shadow the real attestation the same way the Testing section
 	// can. See appendGeneratedSectionsToCleanBodyWithinLimit.
-	cleaned := neutralizeAttestationMarkers(sctx, resolvedProviderForBody(sctx), publicPRIntent(sctx))
+	cleaned := neutralizeAttestationMarkers(nil, resolvedProviderForBody(sctx), publicPRIntent(sctx))
 	if cleaned == "" {
 		return body
 	}

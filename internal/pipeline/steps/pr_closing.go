@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -164,7 +165,6 @@ type closingKeep func(target string) bool
 // closingKeepFor keeps a short (#N) or owner/repo#N target the run requested
 // with --closes, compared the way the Issues section compares them
 // (closingTargets), so author text never calls an issue the PR closes "Refs".
-// A URL target is still neutralized: its host is not checked against the PR's.
 func closingKeepFor(sctx *pipeline.StepContext) closingKeep {
 	if sctx == nil || len(sctx.ClosingIssueRefs) == 0 {
 		return nil
@@ -174,9 +174,27 @@ func closingKeepFor(sctx *pipeline.StepContext) closingKeep {
 		requested[strings.ToLower(ref)] = struct{}{}
 	}
 	repo := prRepository(sctx, resolvedProviderForBody(sctx))
+	host := ""
+	if sctx.Repo != nil {
+		host = scm.ExtractHost(sctx.Repo.UpstreamURL)
+	}
+	if host == "" && sctx.Run != nil && sctx.Run.PRURL != nil {
+		host = scm.ExtractHost(*sctx.Run.PRURL)
+	}
+	if sctx.ForgeContext != nil && sctx.ForgeContext.Host != "" {
+		host = sctx.ForgeContext.Host
+	}
 	return func(target string) bool {
 		if strings.Contains(target, "://") {
-			return false
+			u, err := url.Parse(target)
+			if err != nil || host == "" || !strings.EqualFold(u.Hostname(), host) {
+				return false
+			}
+			parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+			if len(parts) != 4 || parts[2] != "issues" || !strings.EqualFold(strings.Join(parts[:2], "/"), repo) {
+				return false
+			}
+			target = parts[3]
 		}
 		_, ok := requested[strings.ToLower(closingissues.Localize(strings.TrimPrefix(target, "#"), repo))]
 		return ok
@@ -570,7 +588,7 @@ func verifyClosingIssuesInBody(body string, sctx *pipeline.StepContext) error {
 // Issues section last, reserving its room up front so body-limit truncation
 // sheds generated evidence rather than a closing reference.
 func assembleDraftPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD, evidenceMD string, bodyLimit int, provider scm.Provider) string {
-	evidence := neutralizeAttestationMarkers(sctx, provider, evidenceMD)
+	evidence := neutralizeAttestationMarkers(nil, provider, evidenceMD)
 	section := joinBlocks(evidence, issuesSection(sctx, ""))
 	reserve := 0
 	if section != "" {

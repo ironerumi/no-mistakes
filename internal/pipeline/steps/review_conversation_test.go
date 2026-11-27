@@ -452,6 +452,23 @@ func assertSupersedeSection(t *testing.T, conversation bool) {
 	}
 }
 
+func TestBuildReviewConversationNeutralizesRequestedReferences(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := withReviewConversation(newTestContextWithDBRecords(t, newStaticReviewAgent(cleanReviewJSON), dir, baseSHA, headSHA, config.Commands{}))
+	sctx.ClosingIssueRefs = []string{"325"}
+	if err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
+		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, QuestionID: "q1", RunID: sctx.Run.ID, AskOrdinal: 1,
+		Question: "Should we say Closes #325?", Answer: "Yes, Closes #325", AnsweredBy: "captain",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	section := buildReviewConversationSection(sctx)
+	if strings.Contains(section, "Closes #325") || !strings.Contains(section, "Should we say Refs #325?") || !strings.Contains(section, "Yes, Refs #325") {
+		t.Fatalf("review conversation must neutralize even requested issue references:\n%s", section)
+	}
+}
+
 // TestBuildReviewConversationSection covers item 9: the PR body records what
 // was asked, what was answered, and by whom.
 func TestBuildReviewConversationSection(t *testing.T) {

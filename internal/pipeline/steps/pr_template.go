@@ -206,7 +206,7 @@ func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provid
 	}
 	parts := []string{}
 	if intent := publicPRIntent(sctx); intent != "" {
-		parts = append(parts, "## Intent\n\n"+neutralizeAttestationMarkers(sctx, provider, intent))
+		parts = append(parts, "## Intent\n\n"+neutralizeAttestationMarkers(nil, provider, intent))
 	}
 	if evidence != "" {
 		parts = append(parts, evidence)
@@ -219,7 +219,7 @@ func (s *PRStep) recordedPREvidence(sctx *pipeline.StepContext, provider scm.Pro
 	if strings.Count(pipelineMD, pipelineAttestationCommentPrefix) != 1 {
 		return "", fmt.Errorf("cannot publish template narrative without recorded pipeline evidence and attestation")
 	}
-	return joinBlocks(appendixEvidence(appendixMode(sctx), prBodyFlavorFor(provider), risk, testing, pipelineMD, provider), neutralizeAttestationMarkers(sctx, provider, evidence)), nil
+	return joinBlocks(appendixEvidence(appendixMode(sctx), prBodyFlavorFor(provider), risk, testing, pipelineMD, provider), neutralizeAttestationMarkers(nil, provider, evidence)), nil
 }
 
 // publishKeptDraft stores the ordinary narrative above the full owned appendix
