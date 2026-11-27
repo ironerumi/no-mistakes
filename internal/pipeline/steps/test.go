@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +48,14 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	startHead := sctx.Run.HeadSHA
 	baseBranch := effectivePRBaseBranch(sctx)
 	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
+	if err != nil {
+		return nil, err
+	}
+	logUnknownTestKeys(sctx)
+	// Resolved before any turn or command so a trusted guidance file that
+	// cannot be read fails the step before it spends anything. The evidence
+	// turn re-resolves it only when a repair moved the head.
+	runbookSections, err := testRunbookSections(sctx, baseSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +118,7 @@ Rules:
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
-			testRunbookSections(sctx),
+			runbookSections,
 			fixSummaryRules(sctx, s.Name()),
 			historySection,
 		) + testRepairScopeRules
@@ -126,6 +135,7 @@ Previous test findings to address:
 			FallbackSummary: "fix test failures",
 			RunAgent: func(runOpts agent.RunOpts) (*agent.Result, error) {
 				runOpts.RequireCompletedChildren = true
+				runOpts.Env = append(runOpts.Env, testForegroundCommandEnv(sctx)...)
 				result, runErr := sctx.RunAgentBudget(sctx.Ctx, fixTimeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, runOpts)
 				if runErr != nil {
 					return nil, testAgentError(fixTimeout, "agent fix tests", runErr)
@@ -240,7 +250,12 @@ Previous test findings to address:
 	if declaration := commandOverrideDeclaration("test", sctx.Config.CommandOverrides["test"]); declaration != "" && len(baselineResults) > 0 {
 		configuredTestCommand += fmt.Sprintf("Baseline ran with %s. Declare these overrides in testing_summary.\n", declaration)
 	}
-	runbook := testRunbookSections(sctx) + budgetCutGuidanceSection(sctx)
+	if sctx.Run.HeadSHA != startHead {
+		if runbookSections, err = testRunbookSections(sctx, baseSHA); err != nil {
+			return nil, err
+		}
+	}
+	runbook := runbookSections + budgetCutGuidanceSection(sctx)
 	fallbackGuidance := `- Never treat "do not run everything" as permission to run nothing: if no existing check drives a scenario, write or improve a focused test, perform manual verification with evidence, or report a warning finding that sufficient targeted evidence is not possible.
 - If sufficient evidence is not possible, report a warning finding explaining what evidence is missing and why the user needs to decide what to do. When the blocker is a host capability or OS permission the agent's own process lacks (for example, the Screen Recording permission macOS requires to capture a native GUI application), name the specific capability or permission and how to grant it so the user can enable it and re-run, instead of retrying blindly or failing opaquely.`
 	if sctx.Run.VerificationPlan != nil {
@@ -402,6 +417,7 @@ func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error
 		timeout := testAgentTimeout(sctx)
 		result, err := sctx.RunAgentBudget(sctx.Ctx, timeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, agent.RunOpts{
 			RequireCompletedChildren: true,
+			Env:                      testForegroundCommandEnv(sctx),
 			Prompt:                   current,
 			CWD:                      sctx.WorkDir,
 			JSONSchema:               testFindingsSchema,
@@ -477,24 +493,6 @@ Validation errors:
 	}
 	b.WriteString("\n")
 	return b.String()
-}
-
-// testRunbookSections renders the machine-local runbook ahead of the trusted
-// one, for both the repair and the evidence prompt.
-func testRunbookSections(sctx *pipeline.StepContext) string {
-	return repositoryTestInstructionsSection(sctx) + trustedTestInstructionsSection(sctx)
-}
-
-func trustedTestInstructionsSection(sctx *pipeline.StepContext) string {
-	if sctx.Config == nil {
-		return ""
-	}
-	instructions := strings.TrimSpace(sctx.Config.Test.Instructions)
-	if instructions == "" {
-		return ""
-	}
-	return "\nRepository live-validation runbook (trusted, from the default branch):\n" +
-		sanitizePromptMultilineText(instructions) + "\n"
 }
 
 // repositoryTestInstructionsSection renders the operator's machine-local
@@ -642,6 +640,16 @@ func testAgentTimeout(sctx *pipeline.StepContext) time.Duration {
 		return sctx.Config.TestAgentTimeout
 	}
 	return config.DefaultTestAgentTimeout
+}
+
+// testForegroundCommandEnv raises Claude Code's per-command foreground limit
+// to the turn's own budget. Past the default 2-minute limit Claude moves a
+// command to the background and ends its turn, which RequireCompletedChildren
+// refuses (#1740).
+func testForegroundCommandEnv(sctx *pipeline.StepContext) []string {
+	budget := max(testAgentTimeout(sctx), testAgentWorkingTimeout(sctx))
+	ms := strconv.FormatInt(budget.Milliseconds(), 10)
+	return []string{"BASH_DEFAULT_TIMEOUT_MS=" + ms, "BASH_MAX_TIMEOUT_MS=" + ms}
 }
 
 func testAgentWorkingTimeout(sctx *pipeline.StepContext) time.Duration {
