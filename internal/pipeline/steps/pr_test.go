@@ -1226,7 +1226,7 @@ func TestAppendGeneratedSections_StripsAgentGeneratedSections(t *testing.T) {
 	t.Parallel()
 	body := "## Summary\n\n- improve PR descriptions\n\n## Testing\n\n- model-added testing\n\n## Risk Assessment\n\nold risk\n\n## Pipeline\n\nold pipeline"
 
-	got := appendGeneratedSections(nil, 
+	got := appendGeneratedSections(nil,
 		body,
 		"real risk",
 		"## Testing\n\n- deterministic testing",
@@ -1390,7 +1390,7 @@ func TestAppendGeneratedSections_StripsCommonHeadingVariants(t *testing.T) {
 	t.Parallel()
 	body := "## Summary\n\n- improve PR descriptions\n\n## tests:\n\n- model-added testing\n\n## risk assessment\n\nold risk\n\n## Pipeline:\n\nold pipeline"
 
-	got := appendGeneratedSections(nil, 
+	got := appendGeneratedSections(nil,
 		body,
 		"real risk",
 		"## Testing\n\n- deterministic testing",
@@ -1515,7 +1515,7 @@ func TestAppendGeneratedSections_RetainsAttestationWhenEssentialSectionsOverflow
 	pipelineMD := pipelineMarkdownForTest("review round 001")
 	pipelineMD = strings.Replace(pipelineMD, noMistakesPRSignature+"\n\n", noMistakesPRSignature+"\n\n"+attestation+"\n\n", 1)
 
-	got := appendGeneratedSections(nil, 
+	got := appendGeneratedSections(nil,
 		"## What Changed\n\n"+strings.Repeat("change detail\n", 5000),
 		strings.Repeat("risk detail ", 5000),
 		"## Testing\n\n"+strings.Repeat("test detail\n", 5000),
@@ -1556,7 +1556,7 @@ func TestAppendGeneratedSections_TruncatesOversizedLatestPipelineUpdate(t *testi
 	body := "## What Changed\n\n- essential summary survives"
 	latest := "review round 003 - newest oversized update\n" + strings.Repeat("latest detail line stays whole\n", 3000)
 
-	got := appendGeneratedSections(nil, 
+	got := appendGeneratedSections(nil,
 		body,
 		"✅ Low: generated PR body length guard only",
 		"## Testing\n\n- go test ./internal/pipeline/steps",
@@ -1678,7 +1678,7 @@ func TestAppendGeneratedSections_TrimsBodyToKeepLatestPipelineUpdate(t *testing.
 	}
 	body := baseBody + strings.Repeat("filler line keeps body truncatable\n", fillerLen/len("filler line keeps body truncatable\n")+1)
 
-	got := appendGeneratedSections(nil, 
+	got := appendGeneratedSections(nil,
 		body,
 		riskLine,
 		testingMD,

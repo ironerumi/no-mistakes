@@ -763,7 +763,7 @@ func TestHTMLCommentsDoNotChangeClosingCoverage(t *testing.T) {
 			if got := issuesSection(sctx, body); got != "## Issues\n\nCloses #333" {
 				t.Fatalf("code-only reference suppressed closure: %q", got)
 			}
-			if got := neutralizeGitHubClosingReferences(body + "\nCloses `#333`", nil); got != body+"\nRefs #333" {
+			if got := neutralizeGitHubClosingReferences(body+"\nCloses `#333`", nil); got != body+"\nRefs #333" {
 				t.Fatalf("commented closing tag changed neutralization: %q", got)
 			}
 			if err := verifyClosingIssuesInBody(body+"\nCloses #333", sctx); err != nil {
