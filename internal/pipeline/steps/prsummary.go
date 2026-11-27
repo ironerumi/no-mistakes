@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -150,7 +151,7 @@ func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.Ste
 			// worth holding: it survives any future reordering of this section
 			// and is what the regression asserts. The real attestation is
 			// emitted separately by buildPipelineAttestation and is untouched.
-			detailBlocks = append(detailBlocks, neutralizeAttestationMarkers(provider, detail))
+			detailBlocks = append(detailBlocks, neutralizeAttestationMarkers(nil, provider, detail))
 		}
 	}
 
@@ -1675,15 +1676,17 @@ func escapePipelineFoldMarkers(s string) string {
 // And it neutralizes closing references in the provider's own grammar
 // (closingGrammarFor), since every PR-body site that generates text passes
 // through here - the grammar has to travel with the text, because GitLab
-// resolves a reference inside a code block where GitHub does not.
+// resolves a reference inside a code block where GitHub does not. A reference
+// to one of the run's own --closes targets (sctx.ClosingIssueRefs) is kept
+// (closingKeepFor); sctx is nil for text that is never author narrative.
 //
 // Control characters are cleaned first: the publication boundary strips them
 // again, and a terminal escape hidden inside a marker or closing keyword would
 // otherwise hide it from these escapes and become live once it is removed.
-func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
+func neutralizeAttestationMarkers(sctx *pipeline.StepContext, provider scm.Provider, s string) string {
 	s = neutralizePRControls(s)
 	escaped := escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix))
-	return closingGrammarFor(provider).neutralize(escaped)
+	return closingGrammarFor(provider).neutralize(escaped, closingKeepFor(sctx))
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {

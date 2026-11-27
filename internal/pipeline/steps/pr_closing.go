@@ -47,8 +47,9 @@ type closingGrammar struct {
 	// reference extracts the targets of a closing-keyword line.
 	reference *regexp.Regexp
 	// neutralize breaks closing references in generated text under the
-	// supported grammar, which on GitLab is the default server pattern.
-	neutralize func(s string) string
+	// supported grammar, which on GitLab is the default server pattern. A
+	// reference keep reports true for is left closing.
+	neutralize func(s string, keep closingKeep) string
 	// codeAware reports whether the forge ignores a reference inside code. It
 	// decides whether the closing-line scan may skip fenced and indented blocks
 	// (a reference there is a closing reference only on a forge that does not).
@@ -156,18 +157,48 @@ func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 	return lines
 }
 
+// closingKeep reports whether a closing keyword's target is one of the run's
+// own --closes references, which the PR closes anyway. nil keeps nothing.
+type closingKeep func(target string) bool
+
+// closingKeepFor keeps a short (#N) or owner/repo#N target the run requested
+// with --closes, compared the way the Issues section compares them
+// (closingTargets), so author text never calls an issue the PR closes "Refs".
+// A URL target is still neutralized: its host is not checked against the PR's.
+func closingKeepFor(sctx *pipeline.StepContext) closingKeep {
+	if sctx == nil || len(sctx.ClosingIssueRefs) == 0 {
+		return nil
+	}
+	requested := make(map[string]struct{}, len(sctx.ClosingIssueRefs))
+	for _, ref := range sctx.ClosingIssueRefs {
+		requested[strings.ToLower(ref)] = struct{}{}
+	}
+	repo := prRepository(sctx, resolvedProviderForBody(sctx))
+	return func(target string) bool {
+		if strings.Contains(target, "://") {
+			return false
+		}
+		_, ok := requested[strings.ToLower(closingissues.Localize(strings.TrimPrefix(target, "#"), repo))]
+		return ok
+	}
+}
+
 // neutralizeGitHubClosingReferences rewrites every closing-keyword reference
 // in pipeline-generated PR text, including an issue or pull request URL, to a
-// plain non-closing "Refs" reference ("Fixes #12" -> "Refs #12"), outside
+// plain non-closing "Refs" reference ("Fixes #12" -> "Refs #12"), except a
+// target keep reports as one of the run's own --closes references, outside
 // fenced, indented, and inline code and HTML <code>/<pre> elements (a tested
 // command renders as <code>). A target the drafting agent
 // put alone in an inline code span ("Closes `#12`") is unwrapped first, since
 // GitHub ignores a reference in code and the line would only look like it
 // closes the issue.
-func neutralizeGitHubClosingReferences(s string) string {
+func neutralizeGitHubClosingReferences(s string, keep closingKeep) string {
 	rewrite := func(text string) string {
 		return closingReferenceInTextPattern.ReplaceAllStringFunc(text, func(match string) string {
 			m := closingReferenceInTextPattern.FindStringSubmatch(match)
+			if keep != nil && keep(m[2]) {
+				return match
+			}
 			if m[1][0] >= 'a' && m[1][0] <= 'z' {
 				return "refs " + m[2]
 			}
@@ -197,7 +228,9 @@ func skipMarkdownCodeLine(fence *markdownFence, raw string) bool {
 	return inFence || fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ")
 }
 
-func neutralizeGitLabClosingReferences(s string) string {
+// neutralizeGitLabClosingReferences breaks every closing keyword; keep is
+// unused because the break does not rewrite a target as a non-closing one.
+func neutralizeGitLabClosingReferences(s string, _ closingKeep) string {
 	return gitlabClosingKeywordInTextPattern.ReplaceAllStringFunc(s, func(match string) string {
 		return strings.Replace(match, " ", "&#32;", 1)
 	})
@@ -537,7 +570,7 @@ func verifyClosingIssuesInBody(body string, sctx *pipeline.StepContext) error {
 // Issues section last, reserving its room up front so body-limit truncation
 // sheds generated evidence rather than a closing reference.
 func assembleDraftPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD, evidenceMD string, bodyLimit int, provider scm.Provider) string {
-	evidence := neutralizeAttestationMarkers(provider, evidenceMD)
+	evidence := neutralizeAttestationMarkers(sctx, provider, evidenceMD)
 	section := joinBlocks(evidence, issuesSection(sctx, ""))
 	reserve := 0
 	if section != "" {
