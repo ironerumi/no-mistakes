@@ -96,7 +96,7 @@ func TestLocalPointerTarget_RejectsEscapesAndResolvesRootPaths(t *testing.T) {
 	}
 }
 
-func TestDocumentPointerIntegrity_KitPickerDeployFixture(t *testing.T) {
+func TestDocumentPointerIntegrity_DeployFixtureWithoutOperativeConstraints(t *testing.T) {
 	// A document replacement observed in a private repository pointed to ADR 0027.
 	// That ADR states the release-set and native lockfile decisions, but not
 	// either of these two operative deploy-body constraints.
