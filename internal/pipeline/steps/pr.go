@@ -267,7 +267,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 						if err != nil {
 							return nil, err
 						}
-						emptyNarrative = neutralizeAttestationMarkers(provider, draft.Body)
+						emptyNarrative = neutralizeAttestationMarkers(sctx, provider, draft.Body)
 						title = draft.Title
 					} else {
 						if sctx.Config.PR.TitleFormat != "" && !freshTitle {
@@ -294,7 +294,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				if err != nil {
 					return nil, err
 				}
-				emptyNarrative = neutralizeAttestationMarkers(provider, draft.Body)
+				emptyNarrative = neutralizeAttestationMarkers(sctx, provider, draft.Body)
 				title = draft.Title
 			} else if sctx.Config != nil && sctx.Config.PR.TitleFormat != "" && !freshTitle {
 				title, err = s.draftConfiguredPRTitle(sctx, branch, baseBranch, baseSHA)
@@ -317,7 +317,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			}
 			var narrative *string
 			if freshBody {
-				body := neutralizeAttestationMarkers(provider, suppliedPRBody(sctx))
+				body := neutralizeAttestationMarkers(sctx, provider, suppliedPRBody(sctx))
 				narrative = &body
 			}
 			if err := updateOwnedPRWithNarrative(sctx, host, existing, live, title, emptyNarrative, appendix, bodyLimit, narrative); err != nil {
@@ -648,7 +648,7 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		if err != nil {
 			return prContent{}, err
 		}
-		narrative := neutralizeAttestationMarkers(provider, content.Body)
+		narrative := neutralizeAttestationMarkers(sctx, provider, content.Body)
 		appendix = appendIssuesSection(appendix, issuesSection(sctx, narrative))
 		return composeOwnedPRContent(prOwnedBody{before: narrative}, provider, content.Title, appendix, bodyLimit, sctx.WorkDir, nmWorktreesRoot())
 	}
@@ -756,7 +756,7 @@ Final diff paths and statuses:
 			content.Body = strings.TrimSpace(content.Body)
 			content.Body = unwrapNestedPRBody(content.Body)
 			content.Body = stripGeneratedSections(content.Body)
-			content.Body = neutralizeAttestationMarkers(provider, content.Body)
+			content.Body = neutralizeAttestationMarkers(sctx, provider, content.Body)
 			if (content.Title != "" || s.titleReplaced) && content.Body != "" {
 				if !s.titleReplaced {
 					originalTitle := content.Title
@@ -1091,13 +1091,13 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 // narrative intact. prependIntentSectionWithinLimit is the final backstop
 // when even that core overruns.
 func assemblePRBodyFull(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) string {
-	sections := appendGeneratedSections(whatChanged, riskLine, testingMD, pipelineMD, provider)
+	sections := appendGeneratedSections(sctx, whatChanged, riskLine, testingMD, pipelineMD, provider)
 	full := prependIntentSection(sections, sctx)
 	if bodyLimit <= 0 || scm.PRBodyLen(full) <= bodyLimit {
 		return full
 	}
 	if testingMD != "" {
-		sections = appendGeneratedSections(whatChanged, riskLine, "", pipelineMD, provider)
+		sections = appendGeneratedSections(sctx, whatChanged, riskLine, "", pipelineMD, provider)
 		core := prependIntentSection(sections, sctx)
 		if scm.PRBodyLen(core) <= bodyLimit {
 			return core
@@ -1107,7 +1107,7 @@ func assemblePRBodyFull(sctx *pipeline.StepContext, whatChanged, riskLine, testi
 }
 
 func assemblePRBodyCoreWithinLimit(sctx *pipeline.StepContext, whatChanged, riskLine, pipelineMD string, bodyLimit int, provider scm.Provider) string {
-	prefix := prependIntentSection(appendGeneratedSections(whatChanged, riskLine, "", "", provider), sctx)
+	prefix := prependIntentSection(appendGeneratedSections(sctx, whatChanged, riskLine, "", "", provider), sctx)
 	if pipelineMD == "" {
 		return scm.ClampPRBody(prefix, bodyLimit)
 	}
@@ -1152,17 +1152,17 @@ func clampPipelineSectionWithinLimit(pipelineMD string, bodyLimit int) string {
 	return header + updates
 }
 
-func appendGeneratedSections(body, riskLine, testingMD, pipelineMD string, provider scm.Provider) string {
+func appendGeneratedSections(sctx *pipeline.StepContext, body, riskLine, testingMD, pipelineMD string, provider scm.Provider) string {
 	body = stripGeneratedSections(body)
-	return appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD, provider)
+	return appendGeneratedSectionsToCleanBody(sctx, body, riskLine, testingMD, pipelineMD, provider)
 }
 
 func buildPRBodyFull(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, maxBytes int, provider scm.Provider) string {
 	body = stripGeneratedSections(body)
-	sections := appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, maxBytes, provider)
+	sections := appendGeneratedSectionsToCleanBodyWithinLimit(sctx, body, riskLine, testingMD, pipelineMD, maxBytes, provider)
 	// Neutralized for the same reason as in prependIntentSection: intent is
 	// agent-extracted text placed ahead of the pipeline section.
-	cleaned := neutralizeAttestationMarkers(provider, publicPRIntent(sctx))
+	cleaned := neutralizeAttestationMarkers(nil, provider, publicPRIntent(sctx))
 	if cleaned == "" {
 		return sections
 	}
@@ -1175,7 +1175,7 @@ func buildPRBodyFull(body, riskLine, testingMD, pipelineMD string, sctx *pipelin
 	sectionsBudget := maxBytes - len(separator) - len(intent)
 	minimumSectionsBytes := len(pipelineSectionHeader(pipelineMD))
 	if sectionsBudget > 0 && (minimumSectionsBytes == 0 || sectionsBudget >= minimumSectionsBytes) {
-		sections = appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, sectionsBudget, provider)
+		sections = appendGeneratedSectionsToCleanBodyWithinLimit(sctx, body, riskLine, testingMD, pipelineMD, sectionsBudget, provider)
 		return intent + separator + sections
 	}
 
@@ -1186,8 +1186,8 @@ func buildPRBodyFull(body, riskLine, testingMD, pipelineMD string, sctx *pipelin
 	return truncateTextAtLineBoundary(intent, intentBudget, essentialPRBodyTruncationMarker()) + separator + sections
 }
 
-func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD string, provider scm.Provider) string {
-	return appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, maxPullRequestBodyBytes, provider)
+func appendGeneratedSectionsToCleanBody(sctx *pipeline.StepContext, body, riskLine, testingMD, pipelineMD string, provider scm.Provider) string {
+	return appendGeneratedSectionsToCleanBodyWithinLimit(sctx, body, riskLine, testingMD, pipelineMD, maxPullRequestBodyBytes, provider)
 }
 
 // appendGeneratedSectionsToCleanBodyWithinLimit is the single choke point that
@@ -1208,10 +1208,10 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 // still shipped three live foreign markers ahead of the real one. Fencing is no
 // defense either - verify.py reads raw text, so a marker inside a ```text block
 // counts exactly the same.
-func appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {
-	body = neutralizeAttestationMarkers(provider, body)
-	riskLine = neutralizeAttestationMarkers(provider, riskLine)
-	testingMD = neutralizeAttestationMarkers(provider, testingMD)
+func appendGeneratedSectionsToCleanBodyWithinLimit(sctx *pipeline.StepContext, body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {
+	body = neutralizeAttestationMarkers(sctx, provider, body)
+	riskLine = neutralizeAttestationMarkers(nil, provider, riskLine)
+	testingMD = neutralizeAttestationMarkers(nil, provider, testingMD)
 	generatedSections := generatedEssentialSections(riskLine, testingMD)
 	prefix := body + generatedSections
 	if pipelineMD == "" {
@@ -1920,7 +1920,7 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 	// Intent is agent-extracted text that lands ahead of the pipeline section,
 	// so it can shadow the real attestation the same way the Testing section
 	// can. See appendGeneratedSectionsToCleanBodyWithinLimit.
-	cleaned := neutralizeAttestationMarkers(resolvedProviderForBody(sctx), publicPRIntent(sctx))
+	cleaned := neutralizeAttestationMarkers(nil, resolvedProviderForBody(sctx), publicPRIntent(sctx))
 	if cleaned == "" {
 		return body
 	}
@@ -1947,7 +1947,7 @@ func (s *PRStep) fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLi
 	if diffSummary == "" {
 		body = "## What Changed\n\nFinal diff unavailable; no complete scope summary was generated."
 	}
-	body = neutralizeAttestationMarkers(provider, body)
+	body = neutralizeAttestationMarkers(sctx, provider, body)
 	if keepsPRUpdateText(sctx) {
 		return s.publishKeptDraft(sctx, provider, title, body, bodyLimit)
 	}

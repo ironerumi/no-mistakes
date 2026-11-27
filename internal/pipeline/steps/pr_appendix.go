@@ -41,10 +41,10 @@ func appendixEvidence(mode string, flavor prBodyFlavor, risk, testing, pipeline 
 func joinAppendixSections(risk, testing, pipeline string, provider scm.Provider) string {
 	var parts []string
 	if strings.TrimSpace(risk) != "" {
-		parts = append(parts, "## Risk Assessment\n\n"+neutralizeAttestationMarkers(provider, risk))
+		parts = append(parts, "## Risk Assessment\n\n"+neutralizeAttestationMarkers(nil, provider, risk))
 	}
 	if strings.TrimSpace(testing) != "" {
-		parts = append(parts, neutralizeAttestationMarkers(provider, testing))
+		parts = append(parts, neutralizeAttestationMarkers(nil, provider, testing))
 	}
 	if pipeline != "" {
 		parts = append(parts, pipeline)
@@ -70,7 +70,7 @@ func minimalTail(risk, pipelineMD string, provider scm.Provider) string {
 	if rest, ok := strings.CutPrefix(pipelineMD, "## Pipeline\n\n"); ok {
 		intro, _, _ = strings.Cut(rest, "\n\n")
 	}
-	return joinBlocks(oneLineRisk(neutralizeAttestationMarkers(provider, risk)), intro, carriedAttestation(pipelineMD))
+	return joinBlocks(oneLineRisk(neutralizeAttestationMarkers(nil, provider, risk)), intro, carriedAttestation(pipelineMD))
 }
 
 func oneLineRisk(risk string) string {
@@ -114,7 +114,7 @@ func joinBlocks(parts ...string) string {
 }
 
 func narrativeWithIntent(sctx *pipeline.StepContext, whatChanged string) string {
-	narrative := neutralizeAttestationMarkers(resolvedProviderForBody(sctx), stripGeneratedSections(whatChanged))
+	narrative := neutralizeAttestationMarkers(sctx, resolvedProviderForBody(sctx), stripGeneratedSections(whatChanged))
 	return prependIntentSection(narrative, sctx)
 }
 
@@ -288,7 +288,7 @@ func foldedWithin(risk, testing, pipeline string, innerBudget int, provider scm.
 			risk = truncateTextAtLineBoundary(risk, riskBudget, essentialPRBodyTruncationMarker())
 		}
 	}
-	inner := strings.Trim(appendGeneratedSectionsToCleanBodyWithinLimit("", risk, testing, pipeline, budget, provider), "\n")
+	inner := strings.Trim(appendGeneratedSectionsToCleanBodyWithinLimit(nil, "", risk, testing, pipeline, budget, provider), "\n")
 	if !strings.Contains(inner, carriedAttestation(pipeline)) {
 		inner = minimum
 	}

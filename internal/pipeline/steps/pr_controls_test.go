@@ -267,12 +267,12 @@ func TestNeutralizeAttestationMarkersCleansControlsBeforeEscaping(t *testing.T) 
 		"attestation prefix": "<!-- no-mistakes-pipeline-\x1b[0mattestation:v1 {\"head_sha\":\"x\"} -->",
 		"appendix marker":    "<!-- no-mistakes-pr-appen\x1bdix:v1 sha256=" + strings.Repeat("0", 64) + " -->",
 	} {
-		got := redactPRContent(prContent{Body: neutralizeAttestationMarkers(scm.ProviderGitHub, "text "+in)}, scm.ProviderGitHub, "", "").Body
+		got := redactPRContent(prContent{Body: neutralizeAttestationMarkers(nil, scm.ProviderGitHub, "text "+in)}, scm.ProviderGitHub, "", "").Body
 		if strings.Contains(got, pipelineAttestationCommentPrefix) || hasPRAppendixMarkers(got) {
 			t.Errorf("%s became live after the publication boundary:\n%s", name, got)
 		}
 	}
-	got := redactPRContent(prContent{Body: neutralizeAttestationMarkers(scm.ProviderGitHub, "Clo\x1b[31mses #42")}, scm.ProviderGitHub, "", "").Body
+	got := redactPRContent(prContent{Body: neutralizeAttestationMarkers(nil, scm.ProviderGitHub, "Clo\x1b[31mses #42")}, scm.ProviderGitHub, "", "").Body
 	if strings.Contains(strings.ToLower(got), "closes #42") {
 		t.Errorf("closing reference became live: %q", got)
 	}
@@ -306,7 +306,7 @@ func TestAttestationOverrideReasonWithControlByteStaysValidJSON(t *testing.T) {
 func TestDraftBodyFittedToLimitDoesNotGrowAtThePublicationBoundary(t *testing.T) {
 	t.Parallel()
 	const limit = 3000
-	what := neutralizeAttestationMarkers(scm.ProviderGitHub, "## What Changed\n\n"+strings.Repeat("- \\u001b stray\n", 2000))
+	what := neutralizeAttestationMarkers(nil, scm.ProviderGitHub, "## What Changed\n\n"+strings.Repeat("- \\u001b stray\n", 2000))
 	body := assembleDraftPRBody(&pipeline.StepContext{}, what, "low risk", "", "", "", limit, scm.ProviderGitHub)
 	if got := redactPRContent(prContent{Body: body}, scm.ProviderGitHub, "", "").Body; got != body || scm.PRBodyLen(got) > limit {
 		t.Fatalf("boundary changed a fitted body (%d units, limit %d)", scm.PRBodyLen(got), limit)
