@@ -20,8 +20,8 @@ import (
 // section. An author-preserving (pr.template) body keeps its author text
 // verbatim, so only the references the author text does not already close
 // are added to its generated appendix. Closure is never inferred from intent,
-// commits, or branch names: pipeline-generated text is published with its
-// closing references neutralized by the provider's closingGrammar.
+// commits, or branch names: closingGrammar neutralizes generated references,
+// except requested GitHub targets in author narrative (closingKeepFor).
 
 const issuesSectionHeading = "## Issues"
 
